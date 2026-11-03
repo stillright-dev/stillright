@@ -218,7 +218,7 @@ func TestIntegrationFindsRace(t *testing.T) {
 			SELECT customer_id, count(*) FROM sr_it_race WHERE status = 'active' GROUP BY 1 HAVING count(*) > 1`}},
 	}
 
-	ex := Explore(ctx, sc, Options{HTTPTimeout: 5 * time.Second, Seed: 8812, Runs: 40})
+	ex := Explore(ctx, sc, Options{HTTPTimeout: 5 * time.Second, Seed: 8812, Runs: 40, Attempts: 5, Shrink: true})
 	if ex.Failed == 0 {
 		t.Fatalf("race not found in %d sequences", ex.Executed)
 	}
@@ -233,5 +233,10 @@ func TestIntegrationFindsRace(t *testing.T) {
 	if ex.Invariants[0].FirstFailure.Evidence.Total != 1 {
 		t.Errorf("evidence = %+v", ex.Invariants[0].FirstFailure.Evidence)
 	}
-	t.Logf("found in sequence %d: %s", first.Index, perturb.Format(sc, first))
+	sh := ex.Invariants[0].Shrunk
+	if sh == nil || perturb.Format(sc, sh.Sequence) != "[paid ‖ paid]" || sh.Reproduced == 0 {
+		t.Fatalf("shrunk = %+v", sh)
+	}
+	t.Logf("found in sequence %d: %s; shrunk to %s in %d candidates, reproduced %d/%d",
+		first.Index, perturb.Format(sc, first), perturb.Format(sc, sh.Sequence), sh.Tried, sh.Reproduced, sh.Attempts)
 }

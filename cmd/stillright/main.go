@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/stillright/stillright/internal/perturb"
 	"github.com/stillright/stillright/internal/report"
 	"github.com/stillright/stillright/internal/runner"
 	"github.com/stillright/stillright/internal/scenario"
@@ -62,6 +63,10 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	seed := fs.Uint64("seed", 0, "seed for generating sequences (default: random, always printed)")
 	runs := fs.Int("runs", 0, "number of sequences to run (default: the scenario's runs)")
 	keepGoing := fs.Bool("keep-going", false, "keep running after a sequence fails and count failures")
+	replay := fs.Int("replay", -1, "run only sequence `N` of --seed")
+	sequence := fs.String("sequence", "", "run only this sequence, as printed in reports, e.g. '[paid | paid] -> [refunded]'")
+	attempts := fs.Int("attempts", 5, "times to retry a sequence before concluding it passes (replay and shrinking)")
+	noShrink := fs.Bool("no-shrink", false, "report failures as found, without reducing them")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: stillright run [flags] <scenario.yaml>\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -90,6 +95,20 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "stillright: --runs must be at least 1")
 		return 2
 	}
+	if *attempts < 1 {
+		fmt.Fprintln(stderr, "stillright: --attempts must be at least 1")
+		return 2
+	}
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	if set["replay"] && set["sequence"] {
+		fmt.Fprintln(stderr, "stillright: use either --replay or --sequence, not both")
+		return 2
+	}
+	if set["replay"] && (*replay < 0 || !set["seed"]) {
+		fmt.Fprintln(stderr, "stillright: --replay N needs N >= 0 and the --seed that generated it")
+		return 2
+	}
 
 	sc, err := scenario.Load(paths[0])
 	if err != nil {
@@ -97,9 +116,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	seedSet := false
-	fs.Visit(func(f *flag.Flag) { seedSet = seedSet || f.Name == "seed" })
-	if !seedSet {
+	if !set["seed"] {
 		*seed = randomSeed()
 	}
 
@@ -108,10 +125,27 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		Seed:        *seed,
 		Runs:        *runs,
 		KeepGoing:   *keepGoing,
+		Attempts:    *attempts,
+		Shrink:      !*noShrink,
+	}
+	switch {
+	case set["replay"]:
+		seq := perturb.Generate(sc, *seed, *replay)
+		opts.Only = &seq
+	case set["sequence"]:
+		seq, err := perturb.Parse(sc, *sequence)
+		if err != nil {
+			fmt.Fprintf(stderr, "stillright: --sequence: %v\n", err)
+			return 2
+		}
+		opts.Only = &seq
 	}
 	if isTerminal(stderr) {
 		opts.Progress = func(done, planned int) {
-			fmt.Fprintf(stderr, "\rsequence %d/%d", done, planned)
+			fmt.Fprintf(stderr, "\r\033[Krun %d/%d", done, planned)
+		}
+		opts.ShrinkProgress = func(name string, tried, budget int) {
+			fmt.Fprintf(stderr, "\r\033[Kshrinking %q: candidate %d (max %d)", name, tried, budget)
 		}
 	}
 

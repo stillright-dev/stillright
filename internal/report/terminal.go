@@ -22,11 +22,19 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	sc := ex.Scenario
 	fmt.Fprintf(w, "scenario  %s  (%s)\n", sc.Name, sc.Path)
 	fmt.Fprintf(w, "seed      %d\n", ex.Seed)
+	perturbation := "none"
 	if perturb.Enabled(sc.Perturb) {
-		fmt.Fprintf(w, "perturb   %s\n", describePerturb(sc.Perturb))
+		perturbation = describePerturb(sc.Perturb)
+	}
+	fmt.Fprintf(w, "perturb   %s\n", perturbation)
+	switch {
+	case ex.Only != nil && ex.Only.Index >= 0:
+		fmt.Fprintf(w, "runs      replaying sequence %d, up to %d attempts\n", ex.Only.Index, ex.Planned)
+	case ex.Only != nil:
+		fmt.Fprintf(w, "runs      given sequence %s, up to %d attempts\n", perturb.Format(sc, *ex.Only), ex.Planned)
+	case perturb.Enabled(sc.Perturb):
 		fmt.Fprintf(w, "runs      %d sequences (sequence 0 is the declared order)\n", ex.Planned)
-	} else {
-		fmt.Fprintf(w, "perturb   none\n")
+	default:
 		fmt.Fprintf(w, "runs      %d (declared order only)\n", ex.Planned)
 	}
 	switch sc.Setup.Reset {
@@ -64,13 +72,12 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 			fail++
 			fmt.Fprintf(w, "FAIL   %s\n", st.Name)
 			if ex.Executed > 1 || st.FirstSequence.Index != 0 {
-				fmt.Fprintf(w, "       failed in %d of %d sequences; first in sequence %d: %s\n",
-					st.Failed, ex.Executed, st.FirstSequence.Index, perturb.Format(sc, st.FirstSequence))
+				fmt.Fprintf(w, "       failed in %d of %d runs; first in %s\n", st.Failed, ex.Executed, seqLabel(sc, st.FirstSequence))
 			}
 			if st.Errored > 0 {
-				fmt.Fprintf(w, "       could not be checked in %d sequences: %s\n", st.Errored, st.FirstError)
+				fmt.Fprintf(w, "       could not be checked in %d runs: %s\n", st.Errored, st.FirstError)
 			}
-			writeEvidence(w, st.FirstFailure.Evidence)
+			writeFailure(w, ex, st)
 		case st.Errored > 0:
 			errs++
 			fmt.Fprintf(w, "ERROR  %s\n", st.Name)
@@ -85,14 +92,94 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	}
 
 	fmt.Fprintf(w, "\n%d passed, %d failed, %d errors\n", pass, fail, errs)
-	fmt.Fprintf(w, "%d of %d sequences run: %d passed, %d failed, %d could not be verified\n",
+	fmt.Fprintf(w, "%d of %d runs: %d passed, %d failed, %d could not be verified\n",
 		ex.Executed, ex.Planned, ex.Executed-ex.Failed-ex.Errored, ex.Failed, ex.Errored)
 	switch {
 	case ex.Interrupted:
-		fmt.Fprintf(w, "interrupted before all sequences ran\n")
+		fmt.Fprintf(w, "interrupted before everything ran\n")
 	case ex.Executed < ex.Planned:
-		fmt.Fprintf(w, "stopped at the first sequence that did not pass; use --keep-going to run them all\n")
+		fmt.Fprintf(w, "stopped at the first run that did not pass; use --keep-going to run them all\n")
 	}
+}
+
+func seqLabel(sc *scenario.Scenario, seq perturb.Sequence) string {
+	if seq.Index < 0 {
+		return "the given sequence: " + perturb.Format(sc, seq)
+	}
+	return fmt.Sprintf("sequence %d: %s", seq.Index, perturb.Format(sc, seq))
+}
+
+// writeFailure prints the shrunk sequence, the evidence and how to
+// reproduce a failed invariant.
+func writeFailure(w io.Writer, ex *runner.Exploration, st runner.InvariantStats) {
+	sc := ex.Scenario
+	evidence := st.FirstFailure.Evidence
+	smallest := st.FirstSequence
+
+	if sh := st.Shrunk; sh != nil {
+		switch {
+		case sh.Tried == 0:
+			fmt.Fprintf(w, "       could not reproduce it in %d attempts (timing-dependent); not shrunk\n", sh.Attempts)
+		default:
+			smallest = sh.Sequence
+			note := fmt.Sprintf("reproduced %d/%d", sh.Reproduced, sh.Attempts)
+			if sh.Reproduced == 0 {
+				note += ", timing-dependent: try --attempts 20"
+			}
+			if sh.Exceeded {
+				note += fmt.Sprintf("; stopped after %d candidates, may not be minimal", sh.Tried)
+			}
+			fmt.Fprintf(w, "       smallest sequence: %s   (%s; %s)\n", perturb.Format(sc, smallest), describeSequence(smallest), note)
+			if sh.Reproduced > 0 {
+				evidence = sh.Evidence
+			}
+		}
+	}
+
+	if evidence.Total == 1 && len(evidence.Values) == 1 {
+		pairs := make([]string, len(evidence.Columns))
+		for i, c := range evidence.Columns {
+			pairs[i] = c + "=" + cell(evidence.Values[0][i])
+		}
+		fmt.Fprintf(w, "       evidence: %s\n", strings.Join(pairs, " "))
+	} else {
+		writeEvidence(w, evidence)
+	}
+
+	var cmds []string
+	if st.FirstSequence.Index >= 0 {
+		cmds = append(cmds, fmt.Sprintf("stillright run %s --seed %d --replay %d", shellQuote(sc.Path), ex.Seed, st.FirstSequence.Index))
+	}
+	cmds = append(cmds, fmt.Sprintf("stillright run %s --sequence '%s'", shellQuote(sc.Path), perturb.Format(sc, smallest)))
+	for i, c := range cmds {
+		label := "reproduce:"
+		if i > 0 {
+			label = strings.Repeat(" ", len(label))
+		}
+		fmt.Fprintf(w, "       %s %s\n", label, c)
+	}
+}
+
+// describeSequence summarizes a sequence's shape in words.
+func describeSequence(seq perturb.Sequence) string {
+	n, batches := seq.Sends(), len(seq.Batches)
+	switch {
+	case n == 1:
+		return "1 delivery"
+	case batches == 1:
+		return fmt.Sprintf("%d simultaneous deliveries", n)
+	case batches == n:
+		return fmt.Sprintf("%d deliveries, one at a time", n)
+	default:
+		return fmt.Sprintf("%d deliveries in %d batches", n, batches)
+	}
+}
+
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func describePerturb(p scenario.Perturb) string {
@@ -115,11 +202,11 @@ func describePerturb(p scenario.Perturb) string {
 // writeSequence prints the deliveries of the sequence that stopped the run.
 func writeSequence(w io.Writer, res *runner.Result) {
 	sc := res.Scenario
-	label := ""
+	label := seqLabel(sc, res.Sequence)
 	if res.Sequence.Index == 0 {
-		label = " (declared order)"
+		label = "sequence 0 (declared order): " + perturb.Format(sc, res.Sequence)
 	}
-	fmt.Fprintf(w, "sequence %d%s: %s\n", res.Sequence.Index, label, perturb.Format(sc, res.Sequence))
+	fmt.Fprintf(w, "%s\n", label)
 
 	idWidth := 0
 	for _, d := range res.Deliveries {
@@ -147,12 +234,10 @@ func writeSequence(w io.Writer, res *runner.Result) {
 
 func writeEvidence(w io.Writer, rows invariant.Rows) {
 	shown := len(rows.Values)
-	if rows.Total == 1 {
-		fmt.Fprintf(w, "       1 row returned\n")
-	} else if shown < rows.Total {
-		fmt.Fprintf(w, "       %d rows returned (showing first %d)\n", rows.Total, shown)
+	if shown < rows.Total {
+		fmt.Fprintf(w, "       evidence: %d rows (showing first %d)\n", rows.Total, shown)
 	} else {
-		fmt.Fprintf(w, "       %d rows returned\n", rows.Total)
+		fmt.Fprintf(w, "       evidence: %d rows\n", rows.Total)
 	}
 
 	cells := make([][]string, 0, shown+1)

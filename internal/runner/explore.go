@@ -8,20 +8,39 @@ import (
 	"github.com/stillright/stillright/internal/invariant"
 	"github.com/stillright/stillright/internal/perturb"
 	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright/stillright/internal/shrink"
 )
 
 // DefaultRuns is how many sequences are generated when the scenario
 // perturbs deliveries but does not set runs.
 const DefaultRuns = 100
 
+// DefaultShrinkBudget bounds how many candidate sequences are tried when
+// shrinking one failure. Each candidate costs up to Options.Attempts runs.
+const DefaultShrinkBudget = 60
+
 type Options struct {
 	HTTPTimeout time.Duration
 	Seed        uint64
 	Runs        int  // overrides the scenario's runs when > 0
 	KeepGoing   bool // keep running after a sequence fails
-	// Progress, when set, is called after each sequence.
+	// Only, when set, runs just this sequence (a replayed or hand-written
+	// one) up to Attempts times instead of generating Runs sequences.
+	Only *perturb.Sequence
+	// Attempts is how many times a sequence is retried before concluding it
+	// passes, when replaying and when shrinking. Timing bugs do not
+	// reproduce on every run.
+	Attempts int
+	// Shrink reduces each failure to a smaller sequence that still fails.
+	Shrink       bool
+	ShrinkBudget int
+	// Progress, when set, is called after each run.
 	Progress func(done, planned int)
+	// ShrinkProgress, when set, is called after each shrink candidate.
+	ShrinkProgress func(invariant string, tried, budget int)
 }
+
+func (o Options) attempts() int { return max(1, o.Attempts) }
 
 // PlannedRuns is how many sequences an exploration generates. A scenario
 // without perturbation only has its declared order to try, so it runs once
@@ -52,6 +71,8 @@ type Exploration struct {
 	Interrupted bool
 	// Error is set when no sequence could run at all.
 	Error string
+	// Only is the single sequence that was run, when not generating.
+	Only *perturb.Sequence
 }
 
 type InvariantStats struct {
@@ -64,6 +85,21 @@ type InvariantStats struct {
 	FirstSequence perturb.Sequence
 	// FirstError is why it could not be checked, the first time it could not.
 	FirstError string
+	// Shrunk is the reduction of FirstSequence, when shrinking ran.
+	Shrunk *Shrunk
+}
+
+// Shrunk is the smallest sequence found that still breaks an invariant.
+type Shrunk struct {
+	Sequence perturb.Sequence
+	// Reproduced of Attempts confirmation runs of Sequence failed. When
+	// Tried is 0 the original failure could not be reproduced at all and
+	// Sequence is the unshrunk original.
+	Reproduced int
+	Attempts   int
+	Evidence   invariant.Rows // from a failing confirmation run
+	Tried      int            // candidates evaluated
+	Exceeded   bool           // the budget ran out before a minimum
 }
 
 // ExitCode is 0 when every sequence passed, 1 when an invariant failed and
@@ -97,13 +133,20 @@ func Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Explorat
 	return r.Explore(ctx, sc, opts)
 }
 
-// Explore runs sequences 0..planned-1 of opts.Seed, stopping at the first one
-// that does not pass unless opts.KeepGoing is set. The database is reset
-// before every sequence.
+// Explore runs sequences 0..planned-1 of opts.Seed (or opts.Only, up to
+// opts.Attempts times), stopping at the first run that does not pass unless
+// opts.KeepGoing is set, then shrinks each failure when opts.Shrink is set.
+// The database is reset before every run.
 func (r *Runner) Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Exploration {
 	ex := newExploration(sc, opts)
 	for i := 0; i < ex.Planned; i++ {
-		res := r.RunSequence(ctx, sc, perturb.Generate(sc, opts.Seed, i))
+		var seq perturb.Sequence
+		if opts.Only != nil {
+			seq = *opts.Only
+		} else {
+			seq = perturb.Generate(sc, opts.Seed, i)
+		}
+		res := r.RunSequence(ctx, sc, seq)
 		if ctx.Err() != nil {
 			// A sequence cut short by the user says nothing about the app.
 			ex.Interrupted = true
@@ -117,11 +160,77 @@ func (r *Runner) Explore(ctx context.Context, sc *scenario.Scenario, opts Option
 			break
 		}
 	}
+
+	if opts.Shrink && !ex.Interrupted {
+		for i := range ex.Invariants {
+			if ex.Invariants[i].FirstFailure != nil {
+				ex.Invariants[i].Shrunk = r.shrink(ctx, sc, i, ex.Invariants[i].FirstSequence, opts)
+			}
+			if ctx.Err() != nil {
+				ex.Interrupted = true
+				break
+			}
+		}
+	}
 	return ex
 }
 
+// shrink reduces seq, which broke invariant inv once, to a smaller sequence
+// that still breaks it. A candidate counts as failing if it fails in any of
+// opts.Attempts runs.
+func (r *Runner) shrink(ctx context.Context, sc *scenario.Scenario, inv int, seq perturb.Sequence, opts Options) *Shrunk {
+	attempts := opts.attempts()
+	budget := opts.ShrinkBudget
+	if budget <= 0 {
+		budget = DefaultShrinkBudget
+	}
+	// confirm runs seq up to n times, stopping at the first failure when
+	// stopEarly; it returns the failures and the first failing evidence.
+	confirm := func(seq perturb.Sequence, n int, stopEarly bool) (int, *invariant.Rows) {
+		fails := 0
+		var evidence *invariant.Rows
+		for a := 0; a < n && ctx.Err() == nil; a++ {
+			res := r.RunSequence(ctx, sc, seq)
+			if ctx.Err() == nil && res.Invariants[inv].Status == invariant.Fail {
+				fails++
+				if evidence == nil {
+					evidence = &res.Invariants[inv].Evidence
+				}
+				if stopEarly {
+					break
+				}
+			}
+		}
+		return fails, evidence
+	}
+
+	if fails, _ := confirm(seq, attempts, true); fails == 0 {
+		return &Shrunk{Sequence: seq, Attempts: attempts}
+	}
+	tried := 0
+	res := shrink.Shrink(seq, func(cand perturb.Sequence) bool {
+		fails, _ := confirm(cand, attempts, true)
+		tried++
+		if opts.ShrinkProgress != nil {
+			opts.ShrinkProgress(sc.Invariants[inv].Name, tried, budget)
+		}
+		return fails > 0
+	}, budget)
+
+	out := &Shrunk{Sequence: res.Sequence, Attempts: attempts, Tried: res.Tried, Exceeded: res.Exceeded}
+	fails, evidence := confirm(res.Sequence, attempts, false)
+	out.Reproduced = fails
+	if evidence != nil {
+		out.Evidence = *evidence
+	}
+	return out
+}
+
 func newExploration(sc *scenario.Scenario, opts Options) *Exploration {
-	ex := &Exploration{Scenario: sc, Seed: opts.Seed, Planned: PlannedRuns(sc, opts.Runs)}
+	ex := &Exploration{Scenario: sc, Seed: opts.Seed, Planned: PlannedRuns(sc, opts.Runs), Only: opts.Only}
+	if opts.Only != nil {
+		ex.Planned = opts.attempts()
+	}
 	for _, inv := range sc.Invariants {
 		ex.Invariants = append(ex.Invariants, InvariantStats{Name: inv.Name})
 	}

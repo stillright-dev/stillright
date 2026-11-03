@@ -79,18 +79,20 @@ sequence 37: [paid ‖ paid+120ms] → [refunded]
 
 PASS   refund leaves no active subscription
 FAIL   one active subscription per customer
-       failed in 1 of 38 sequences; first in sequence 37: [paid ‖ paid+120ms] → [refunded]
-       12 rows returned (showing first 2)
+       failed in 1 of 38 runs; first in sequence 37: [paid ‖ paid+120ms] → [refunded]
+       evidence: 12 rows (showing first 2)
        customer_id | count | note
        ------------+-------+-------------------------------------------------------------
        42          | 2     | NULL
        7           | 3     | xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…
+       reproduce: stillright run stillright/payment.yaml --seed 8812 --replay 37
+                  stillright run stillright/payment.yaml --sequence '[paid ‖ paid+120ms] → [refunded]'
 ERROR  bad
        query failed: column nope does not exist
 
 1 passed, 1 failed, 1 errors
-38 of 200 sequences run: 37 passed, 0 failed, 1 could not be verified
-stopped at the first sequence that did not pass; use --keep-going to run them all
+38 of 200 runs: 37 passed, 0 failed, 1 could not be verified
+stopped at the first run that did not pass; use --keep-going to run them all
 `
 	if got := b.String(); got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
@@ -119,7 +121,7 @@ func TestTerminalSequenceError(t *testing.T) {
 		"perturb   none\nruns      1 (declared order only)\n",
 		"sequence 0 (declared order): [paid] → [refunded]\n  batch 1   paid  POST /p  → no response  (0s)\n",
 		"\nERROR  sequence could not be verified: " + reason + "\n\nERROR  refund leaves no active subscription\nERROR  one active",
-		"0 passed, 0 failed, 3 errors\n1 of 1 sequences run: 0 passed, 0 failed, 1 could not be verified\n",
+		"0 passed, 0 failed, 3 errors\n1 of 1 runs: 0 passed, 0 failed, 1 could not be verified\n",
 	} {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in:\n%s", w, got)
@@ -137,5 +139,77 @@ func TestTerminalCouldNotStart(t *testing.T) {
 	Terminal(&b, ex)
 	if !strings.Contains(b.String(), "ERROR  could not start: cannot connect to database: connection refused\n\nERROR  refund") {
 		t.Errorf("got:\n%s", b.String())
+	}
+}
+
+func shrunkExploration(sh *runner.Shrunk) *runner.Exploration {
+	sc := testScenario()
+	sc.Path = "stillright/my payment.yaml"
+	orig := perturb.Sequence{Index: 6, Batches: []perturb.Batch{{{Event: 0, Delay: 24 * time.Millisecond}, {Event: 1}, {Event: 0}}}}
+	fail := invariant.Result{Status: invariant.Fail, Evidence: invariant.Rows{
+		Columns: []string{"customer_id", "count"}, Values: [][]*string{{str("42"), str("3")}}, Total: 1,
+	}}
+	ex := &runner.Exploration{Scenario: sc, Seed: 8812, Planned: 100, Executed: 100, Failed: 10}
+	ex.Invariants = []runner.InvariantStats{
+		{Name: "refund leaves no active subscription"},
+		{Name: "one active subscription per customer", Failed: 10, FirstFailure: &fail, FirstSequence: orig, Shrunk: sh},
+		{Name: "bad"},
+	}
+	return ex
+}
+
+func TestTerminalShrunk(t *testing.T) {
+	sh := &runner.Shrunk{
+		Sequence:   perturb.Sequence{Index: -1, Batches: []perturb.Batch{{{Event: 0}, {Event: 0}}}},
+		Reproduced: 5, Attempts: 5, Tried: 14,
+		Evidence: invariant.Rows{Columns: []string{"customer_id", "count"}, Values: [][]*string{{str("42"), str("2")}}, Total: 1},
+	}
+	var b strings.Builder
+	Terminal(&b, shrunkExploration(sh))
+	want := `FAIL   one active subscription per customer
+       failed in 10 of 100 runs; first in sequence 6: [paid+24ms ‖ refunded ‖ paid]
+       smallest sequence: [paid ‖ paid]   (2 simultaneous deliveries; reproduced 5/5)
+       evidence: customer_id=42 count=2
+       reproduce: stillright run 'stillright/my payment.yaml' --seed 8812 --replay 6
+                  stillright run 'stillright/my payment.yaml' --sequence '[paid ‖ paid]'
+PASS   bad
+`
+	if got := b.String(); !strings.Contains(got, want) {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestTerminalShrunkFlakyAndBudget(t *testing.T) {
+	sh := &runner.Shrunk{
+		Sequence: perturb.Sequence{Index: -1, Batches: []perturb.Batch{{{Event: 1}}, {{Event: 0}}}},
+		Attempts: 5, Tried: 60, Exceeded: true,
+	}
+	var b strings.Builder
+	Terminal(&b, shrunkExploration(sh))
+	got := b.String()
+	for _, w := range []string{
+		"smallest sequence: [refunded] → [paid]   (2 deliveries, one at a time; reproduced 0/5, timing-dependent: try --attempts 20; stopped after 60 candidates, may not be minimal)\n",
+		// with no reproduction, the evidence is the original failure's
+		"evidence: customer_id=42 count=3\n",
+		"--sequence '[refunded] → [paid]'",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
+	}
+}
+
+func TestTerminalNotReproducible(t *testing.T) {
+	sh := &runner.Shrunk{Sequence: perturb.Sequence{Index: 6}, Attempts: 5}
+	var b strings.Builder
+	Terminal(&b, shrunkExploration(sh))
+	got := b.String()
+	for _, w := range []string{
+		"could not reproduce it in 5 attempts (timing-dependent); not shrunk\n       evidence: customer_id=42 count=3\n",
+		"--sequence '[paid+24ms ‖ refunded ‖ paid]'",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
 	}
 }

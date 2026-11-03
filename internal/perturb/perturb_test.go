@@ -2,6 +2,7 @@ package perturb
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,40 @@ func TestIntnUniform(t *testing.T) {
 	for v, c := range counts {
 		if c < 9500 || c > 10500 {
 			t.Errorf("value %d drawn %d times of 30000", v, c)
+		}
+	}
+}
+
+func TestParseRoundTrip(t *testing.T) {
+	sc := payments(full)
+	for i := 0; i < 30; i++ {
+		seq := Generate(sc, 11, i)
+		got, err := Parse(sc, Format(sc, seq))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got.Index = seq.Index
+		if !reflect.DeepEqual(got, seq) {
+			t.Fatalf("round trip of %s gave %s", Format(sc, seq), Format(sc, got))
+		}
+	}
+}
+
+func TestParseASCIIAndErrors(t *testing.T) {
+	sc := payments(full)
+	seq, err := Parse(sc, " [paid | paid+120ms] -> [refunded] ")
+	if err != nil || Format(sc, seq) != "[paid ‖ paid+120ms] → [refunded]" || seq.Index != -1 {
+		t.Errorf("seq = %s, err = %v", Format(sc, seq), err)
+	}
+	for in, want := range map[string]string{
+		"[paid] → refunded": "must be written in brackets",
+		"[paid ‖ nope]":     `unknown event "nope"`,
+		"[paid+12]":         "must look like +120ms",
+		"[]":                `unknown event ""`,
+		"[paid+-5ms]":       "must look like +120ms",
+	} {
+		if _, err := Parse(sc, in); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("Parse(%q) error = %v, want %q", in, err, want)
 		}
 	}
 }

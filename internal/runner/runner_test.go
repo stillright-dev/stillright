@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -333,4 +334,118 @@ func TestExploreInterrupted(t *testing.T) {
 	if !ex.Interrupted || ex.Executed != 0 || ex.ExitCode() != 2 {
 		t.Errorf("interrupted=%v executed=%d exit=%d", ex.Interrupted, ex.Executed, ex.ExitCode())
 	}
+}
+
+// dupApp is a fake application and database in one: the "broken" invariant
+// fails whenever /1 was delivered at least twice since the last reset. flaky
+// makes every other failing run pass, like a timing bug.
+type dupApp struct {
+	fakeStore
+	mu    sync.Mutex
+	hits  int
+	runs  int
+	flaky bool
+}
+
+func (a *dupApp) Send(_ context.Context, r scenario.Request) (Response, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if r.Path == "/1" {
+		a.hits++
+	}
+	return Response{Status: 200}, nil
+}
+
+func (a *dupApp) Reset(context.Context, []string) error {
+	a.hits = 0
+	a.runs++
+	return nil
+}
+
+func (a *dupApp) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+	if sql == "Q2" && a.hits >= 2 && !(a.flaky && a.runs%2 == 0) {
+		return invariant.Rows{Columns: []string{"hits"}, Values: [][]*string{{ptr(fmt.Sprint(a.hits))}}, Total: 1}, nil
+	}
+	return invariant.Rows{}, nil
+}
+
+func ptr(s string) *string { return &s }
+
+func dupScenario() *scenario.Scenario {
+	sc := testScenario()
+	sc.Perturb = scenario.Perturb{Duplicate: 3, Concurrency: 4, DelayMS: []int{0, 5}}
+	return sc
+}
+
+func TestExploreShrinks(t *testing.T) {
+	sc := dupScenario()
+	app := &dupApp{}
+	ex := (&Runner{Target: app, Store: app}).Explore(context.Background(), sc, Options{Seed: 3, Runs: 50, Attempts: 3, Shrink: true})
+
+	st := ex.Invariants[1]
+	if st.FirstFailure == nil || st.Shrunk == nil {
+		t.Fatalf("no failure or no shrink: %+v", st)
+	}
+	if got := perturb.Format(sc, st.Shrunk.Sequence); got != "[first ‖ first]" {
+		t.Errorf("shrunk to %s (from %s)", got, perturb.Format(sc, st.FirstSequence))
+	}
+	if st.Shrunk.Reproduced != 3 || st.Shrunk.Attempts != 3 || st.Shrunk.Tried == 0 {
+		t.Errorf("shrunk = %+v", st.Shrunk)
+	}
+	if *st.Shrunk.Evidence.Values[0][0] != "2" {
+		t.Errorf("evidence should come from the shrunk run, got %v", *st.Shrunk.Evidence.Values[0][0])
+	}
+	if ex.Invariants[0].Shrunk != nil {
+		t.Error("passing invariant must not be shrunk")
+	}
+}
+
+func TestShrinkFlakyReportsRate(t *testing.T) {
+	sc := dupScenario()
+	app := &dupApp{flaky: true}
+	ex := (&Runner{Target: app, Store: app}).Explore(context.Background(), sc, Options{Seed: 3, Runs: 50, Attempts: 4, Shrink: true})
+	sh := ex.Invariants[1].Shrunk
+	if sh == nil || sh.Reproduced != 2 || sh.Attempts != 4 {
+		t.Fatalf("shrunk = %+v", sh)
+	}
+}
+
+func TestReplayRetriesUntilFailure(t *testing.T) {
+	sc := dupScenario()
+	app := &dupApp{flaky: true}
+	seq := perturb.Sequence{Index: 9, Batches: []perturb.Batch{{{Event: 0}, {Event: 0}}}}
+	// Runs alternate fail/pass; Reset is counted before the run, so the
+	// first run (runs=1) fails. Skip one run to start on a passing one.
+	app.runs = 1
+	ex := (&Runner{Target: app, Store: app}).Explore(context.Background(), sc, Options{Only: &seq, Attempts: 5})
+	if ex.Planned != 5 || ex.Executed != 2 || ex.Failed != 1 || ex.Invariants[1].FirstSequence.Index != 9 {
+		t.Errorf("planned=%d executed=%d failed=%d", ex.Planned, ex.Executed, ex.Failed)
+	}
+}
+
+func TestShrinkGivesUpWhenNotReproducible(t *testing.T) {
+	sc := dupScenario()
+	app := &onceApp{}
+	ex := (&Runner{Target: app, Store: app}).Explore(context.Background(), sc, Options{Seed: 3, Runs: 5, Attempts: 3, Shrink: true})
+	sh := ex.Invariants[1].Shrunk
+	if sh == nil || sh.Tried != 0 || sh.Reproduced != 0 || app.runs != 4 {
+		t.Errorf("shrunk=%+v runs=%d (want 1 failing run + 3 attempts)", sh, app.runs)
+	}
+}
+
+// onceApp fails "broken" on its first run only.
+type onceApp struct {
+	fakeStore
+	runs int
+}
+
+func (a *onceApp) Send(context.Context, scenario.Request) (Response, error) {
+	return Response{Status: 200}, nil
+}
+func (a *onceApp) Reset(context.Context, []string) error { a.runs++; return nil }
+func (a *onceApp) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+	if sql == "Q2" && a.runs == 1 {
+		return invariant.Rows{Columns: []string{"x"}, Total: 1}, nil
+	}
+	return invariant.Rows{}, nil
 }
