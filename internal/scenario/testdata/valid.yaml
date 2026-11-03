@@ -1,0 +1,40 @@
+version: 1
+name: payment-confirmed
+target:
+  base_url: http://localhost:3000/
+  database_url: ${DATABASE_URL}
+setup:
+  sql: fixtures/seed.sql
+  reset: truncate
+  reset_tables: [subscriptions, payments, public.emails]
+events:
+  - id: paid
+    request:
+      method: post
+      path: /webhooks/payment
+      headers: { Content-Type: application/json, X-Token: "${HOOK_TOKEN}" }
+      body_file: fixtures/paid.json
+  - id: refunded
+    request:
+      method: POST
+      path: /webhooks/payment
+      body_file: fixtures/refunded.json
+    after: paid
+perturb:
+  duplicate: 3
+  concurrency: 5
+  reorder: true
+  delay_ms: [0, 250]
+runs: 200
+invariants:
+  - name: one active subscription per customer
+    sql: |
+      SELECT customer_id, count(*) FROM subscriptions
+      WHERE status = 'active' GROUP BY 1 HAVING count(*) > 1
+  - name: refunded payment leaves no active subscription
+    sql: |
+      SELECT s.id FROM subscriptions s JOIN payments p ON p.subscription_id = s.id
+      WHERE p.status = 'refunded' AND s.status = 'active'
+effects:
+  - name: at most one welcome email
+    assert: count(host == "api.email.local" && path == "/send") <= 1
