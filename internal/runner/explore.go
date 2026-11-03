@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/stillright/stillright/internal/invariant"
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/scenario"
-	"github.com/stillright/stillright/internal/shrink"
+	"github.com/stillright-dev/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/shrink"
 )
 
 // DefaultRuns is how many sequences are generated when the scenario

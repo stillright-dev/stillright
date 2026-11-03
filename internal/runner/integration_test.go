@@ -13,9 +13,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/stillright/stillright/internal/invariant"
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // These tests need a disposable PostgreSQL database; they create and truncate

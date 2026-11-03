@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 func payments(p scenario.Perturb) *scenario.Scenario {

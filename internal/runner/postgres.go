@@ -6,7 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/stillright/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/invariant"
 )
 
 // Store is the database the application under test writes to.

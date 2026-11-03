@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/stillright/stillright/internal/invariant"
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // Delivery is one request sent to the application.

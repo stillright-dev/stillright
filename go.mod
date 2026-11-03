@@ -1,4 +1,4 @@
-module github.com/stillright/stillright
+module github.com/stillright-dev/stillright
 
 go 1.25.0
 

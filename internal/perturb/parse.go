@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // Parse reads a sequence written as Format writes it. ASCII "->" and "|" are

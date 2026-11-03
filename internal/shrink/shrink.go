@@ -4,7 +4,7 @@
 package shrink
 
 import (
-	"github.com/stillright/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/perturb"
 )
 
 // Oracle reports whether a candidate sequence still fails. It runs the

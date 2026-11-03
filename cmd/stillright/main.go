@@ -13,10 +13,10 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/report"
-	"github.com/stillright/stillright/internal/runner"
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/report"
+	"github.com/stillright-dev/stillright/internal/runner"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".

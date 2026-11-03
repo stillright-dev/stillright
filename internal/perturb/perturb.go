@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // Send is one delivery of an event.

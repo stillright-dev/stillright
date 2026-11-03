@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // MaxEvidenceRows is how many violating rows are kept per failed invariant.

@@ -8,10 +8,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/stillright/stillright/internal/invariant"
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/runner"
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/runner"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // maxCellWidth truncates long values in evidence tables.

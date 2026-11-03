@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stillright/stillright/internal/perturb"
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/perturb"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 var sc = &scenario.Scenario{Events: []scenario.Event{{ID: "paid"}, {ID: "refunded"}, {ID: "shipped"}}}

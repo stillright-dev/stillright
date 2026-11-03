@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stillright/stillright/internal/scenario"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // Target is the application under test.
