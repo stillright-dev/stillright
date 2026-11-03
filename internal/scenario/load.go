@@ -360,6 +360,14 @@ func (v *validator) validateEvents(sc *Scenario) {
 		if r.BodyFile != "" {
 			r.Body = v.readFile(sc.Dir, r.BodyFile, p("events", i, "request", "body_file"))
 		}
+		if v.has("events", i, "accept_status") && len(ev.AcceptStatus) == 0 {
+			v.fail(p("events", i, "accept_status"), "must list at least one status code")
+		}
+		for j, code := range ev.AcceptStatus {
+			if code < 100 || code > 599 {
+				v.fail(p("events", i, "accept_status", j), "%d is not an HTTP status code", code)
+			}
+		}
 	}
 
 	for i, ev := range sc.Events {

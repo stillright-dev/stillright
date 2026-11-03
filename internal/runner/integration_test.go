@@ -11,8 +11,10 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/stillright/stillright/internal/invariant"
+	"github.com/stillright/stillright/internal/perturb"
 	"github.com/stillright/stillright/internal/scenario"
 )
 
@@ -106,7 +108,11 @@ func TestIntegrationPostgres(t *testing.T) {
 		},
 	}
 
-	res := Execute(ctx, sc, Options{HTTPTimeout: 5 * time.Second})
+	ex := Explore(ctx, sc, Options{HTTPTimeout: 5 * time.Second})
+	if ex.Executed != 1 || ex.First == nil {
+		t.Fatalf("executed=%d first=%v error=%q", ex.Executed, ex.First, ex.Error)
+	}
+	res := ex.First
 	if res.Error != "" {
 		t.Fatalf("run error: %s", res.Error)
 	}
@@ -137,14 +143,14 @@ func TestIntegrationPostgres(t *testing.T) {
 	if err := db.QueryRow(ctx, `SELECT count(*) FROM sr_it_customers`).Scan(&customers); err != nil || customers != 2 {
 		t.Errorf("customers = %d, %v (invariant must not delete)", customers, err)
 	}
-	if res.ExitCode() != 2 {
-		t.Errorf("exit = %d", res.ExitCode())
+	if ex.ExitCode() != 2 {
+		t.Errorf("exit = %d", ex.ExitCode())
 	}
 
 	t.Run("app 500 is an error", func(t *testing.T) {
 		crash := *sc
 		crash.Events = []scenario.Event{{ID: "crash", Request: scenario.Request{Method: "POST", Path: "/hook", Body: []byte(`{"type":"crash"}`), BodyFile: "c.json"}}}
-		res := Execute(ctx, &crash, Options{HTTPTimeout: 5 * time.Second})
+		res := Explore(ctx, &crash, Options{HTTPTimeout: 5 * time.Second}).First
 		if !strings.Contains(res.Error, `event "crash": application answered 500: unhandled exception`) {
 			t.Errorf("error = %q", res.Error)
 		}
@@ -153,18 +159,79 @@ func TestIntegrationPostgres(t *testing.T) {
 	t.Run("unreachable database is an error", func(t *testing.T) {
 		bad := *sc
 		bad.Target.DatabaseURL = "postgres://localhost:1/nope?connect_timeout=2"
-		res := Execute(ctx, &bad, Options{})
-		if !strings.HasPrefix(res.Error, "cannot connect to database") || res.ExitCode() != 2 {
-			t.Errorf("error = %q exit=%d", res.Error, res.ExitCode())
+		ex := Explore(ctx, &bad, Options{})
+		if !strings.HasPrefix(ex.Error, "cannot connect to database") || ex.ExitCode() != 2 {
+			t.Errorf("error = %q exit=%d", ex.Error, ex.ExitCode())
 		}
 	})
 
 	t.Run("unreachable app is an error", func(t *testing.T) {
 		down := *sc
 		down.Target.BaseURL = "http://127.0.0.1:1"
-		res := Execute(ctx, &down, Options{HTTPTimeout: time.Second})
+		res := Explore(ctx, &down, Options{HTTPTimeout: time.Second}).First
 		if !strings.Contains(res.Error, "no response from http://127.0.0.1:1") {
 			t.Errorf("error = %q", res.Error)
 		}
 	})
+}
+
+// TestIntegrationFindsRace runs an app that checks for an active subscription
+// before inserting one. Delivered once at a time it is correct; delivered
+// concurrently it double-subscribes. Only perturbation can find the bug.
+func TestIntegrationFindsRace(t *testing.T) {
+	url := testDatabaseURL(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS sr_it_race (id serial PRIMARY KEY, customer_id int, status text)`); err != nil {
+		t.Fatal(err)
+	}
+
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var exists bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sr_it_race WHERE customer_id = 42 AND status = 'active')`).Scan(&exists); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		time.Sleep(20 * time.Millisecond) // the window between check and insert
+		if !exists {
+			if _, err := pool.Exec(ctx, `INSERT INTO sr_it_race (customer_id, status) VALUES (42, 'active')`); err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+		}
+		w.WriteHeader(200)
+	}))
+	defer app.Close()
+
+	sc := &scenario.Scenario{
+		Name:    "race",
+		Target:  scenario.Target{BaseURL: app.URL, DatabaseURL: url},
+		Setup:   scenario.Setup{Reset: scenario.ResetTruncate, ResetTables: []string{"sr_it_race"}},
+		Events:  []scenario.Event{{ID: "paid", Request: scenario.Request{Method: "POST", Path: "/hook"}}},
+		Perturb: scenario.Perturb{Duplicate: 3, Concurrency: 3},
+		Invariants: []scenario.Invariant{{Name: "one active subscription", SQL: `
+			SELECT customer_id, count(*) FROM sr_it_race WHERE status = 'active' GROUP BY 1 HAVING count(*) > 1`}},
+	}
+
+	ex := Explore(ctx, sc, Options{HTTPTimeout: 5 * time.Second, Seed: 8812, Runs: 40})
+	if ex.Failed == 0 {
+		t.Fatalf("race not found in %d sequences", ex.Executed)
+	}
+	first := ex.First.Sequence
+	concurrent := false
+	for _, b := range first.Batches {
+		concurrent = concurrent || len(b) > 1
+	}
+	if !concurrent {
+		t.Errorf("failing sequence has no concurrent batch: %s", perturb.Format(sc, first))
+	}
+	if ex.Invariants[0].FirstFailure.Evidence.Total != 1 {
+		t.Errorf("evidence = %+v", ex.Invariants[0].FirstFailure.Evidence)
+	}
+	t.Logf("found in sequence %d: %s", first.Index, perturb.Format(sc, first))
 }

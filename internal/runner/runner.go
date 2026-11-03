@@ -6,10 +6,13 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/stillright/stillright/internal/invariant"
+	"github.com/stillright/stillright/internal/perturb"
 	"github.com/stillright/stillright/internal/scenario"
 )
 
@@ -18,13 +21,19 @@ type Delivery struct {
 	EventID  string
 	Method   string
 	Path     string
+	Batch    int
+	Delay    time.Duration
 	Status   int // 0 when no response was received
 	Duration time.Duration
+	// Err is set when the delivery was not handled: no response, or a status
+	// outside the event's accept_status.
+	Err string
 }
 
-// Result is the outcome of running a scenario once.
+// Result is the outcome of running one sequence.
 type Result struct {
 	Scenario   *scenario.Scenario
+	Sequence   perturb.Sequence
 	Deliveries []Delivery
 	Invariants []invariant.Result
 	// Error explains why the run could not be verified. When set, every
@@ -32,20 +41,20 @@ type Result struct {
 	Error string
 }
 
-// ExitCode is 0 when every invariant passed, 1 when any failed and 2 when any
-// could not be checked. ERROR wins over FAIL: a run that was not fully
+// Status is ERROR when any invariant could not be checked, FAIL when any
+// failed and PASS otherwise. ERROR wins over FAIL: a run that was not fully
 // verified must not look like an ordinary failure.
-func (r *Result) ExitCode() int {
-	code := 0
+func (r *Result) Status() invariant.Status {
+	status := invariant.Pass
 	for _, inv := range r.Invariants {
 		switch inv.Status {
 		case invariant.Error:
-			return 2
+			return invariant.Error
 		case invariant.Fail:
-			code = 1
+			status = invariant.Fail
 		}
 	}
-	return code
+	return status
 }
 
 type Runner struct {
@@ -53,30 +62,10 @@ type Runner struct {
 	Store  Store
 }
 
-// Options configure Execute.
-type Options struct {
-	HTTPTimeout time.Duration
-}
-
-// Execute connects to the scenario's database and application and runs it.
-func Execute(ctx context.Context, sc *scenario.Scenario, opts Options) *Result {
-	store, err := OpenPostgres(ctx, sc.Target.DatabaseURL)
-	if err != nil {
-		return failed(&Result{Scenario: sc}, fmt.Sprintf("cannot connect to database: %v", err))
-	}
-	defer store.Close(context.WithoutCancel(ctx))
-
-	r := &Runner{
-		Target: &HTTPTarget{BaseURL: sc.Target.BaseURL, Client: &http.Client{Timeout: opts.HTTPTimeout}},
-		Store:  store,
-	}
-	return r.Run(ctx, sc)
-}
-
-// Run executes the scenario once: reset, setup, deliver every event once in
-// declared order, then check the invariants.
-func (r *Runner) Run(ctx context.Context, sc *scenario.Scenario) *Result {
-	res := &Result{Scenario: sc}
+// RunSequence executes one sequence: reset, setup, deliver each batch with
+// its sends released together, then check the invariants.
+func (r *Runner) RunSequence(ctx context.Context, sc *scenario.Scenario, seq perturb.Sequence) *Result {
+	res := &Result{Scenario: sc, Sequence: seq}
 
 	if sc.Setup.Reset == scenario.ResetTruncate {
 		if err := r.Store.Reset(ctx, sc.Setup.ResetTables); err != nil {
@@ -89,20 +78,13 @@ func (r *Runner) Run(ctx context.Context, sc *scenario.Scenario) *Result {
 		}
 	}
 
-	for _, ev := range sc.Events {
-		resp, err := r.Target.Send(ctx, ev.Request)
-		res.Deliveries = append(res.Deliveries, Delivery{
-			EventID:  ev.ID,
-			Method:   ev.Request.Method,
-			Path:     ev.Request.Path,
-			Status:   resp.Status,
-			Duration: resp.Duration,
-		})
-		if err != nil {
-			return failed(res, fmt.Sprintf("event %q: no response from %s: %v", ev.ID, sc.Target.BaseURL, err))
-		}
-		if resp.Status >= 500 {
-			return failed(res, fmt.Sprintf("event %q: application answered %d%s", ev.ID, resp.Status, bodySuffix(resp.Body)))
+	for bi, batch := range seq.Batches {
+		delivered := r.deliverBatch(ctx, sc, bi, batch)
+		res.Deliveries = append(res.Deliveries, delivered...)
+		for _, d := range delivered {
+			if d.Err != "" {
+				return failed(res, fmt.Sprintf("event %q: %s", d.EventID, d.Err))
+			}
 		}
 	}
 
@@ -110,6 +92,54 @@ func (r *Runner) Run(ctx context.Context, sc *scenario.Scenario) *Result {
 		res.Invariants = append(res.Invariants, invariant.Check(ctx, r.Store, inv))
 	}
 	return res
+}
+
+// deliverBatch sends every delivery of a batch concurrently. Goroutines wait
+// on a barrier so the sends are released as close together as possible, then
+// each sleeps its own delay before sending.
+func (r *Runner) deliverBatch(ctx context.Context, sc *scenario.Scenario, bi int, batch perturb.Batch) []Delivery {
+	out := make([]Delivery, len(batch))
+	var ready, done sync.WaitGroup
+	release := make(chan struct{})
+	ready.Add(len(batch))
+	done.Add(len(batch))
+	for i, s := range batch {
+		go func() {
+			defer done.Done()
+			ready.Done()
+			<-release
+			out[i] = r.deliver(ctx, sc, sc.Events[s.Event], bi, s.Delay)
+		}()
+	}
+	ready.Wait()
+	close(release)
+	done.Wait()
+	return out
+}
+
+func (r *Runner) deliver(ctx context.Context, sc *scenario.Scenario, ev scenario.Event, batch int, delay time.Duration) Delivery {
+	d := Delivery{EventID: ev.ID, Method: ev.Request.Method, Path: ev.Request.Path, Batch: batch, Delay: delay}
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			d.Err = ctx.Err().Error()
+			return d
+		}
+	}
+	resp, err := r.Target.Send(ctx, ev.Request)
+	d.Status, d.Duration = resp.Status, resp.Duration
+	switch {
+	case err != nil:
+		d.Err = fmt.Sprintf("no response from %s: %v", sc.Target.BaseURL, err)
+	case len(ev.AcceptStatus) > 0 && !slices.Contains(ev.AcceptStatus, resp.Status):
+		d.Err = fmt.Sprintf("application answered %d, not in accept_status %v%s", resp.Status, ev.AcceptStatus, bodySuffix(resp.Body))
+	case len(ev.AcceptStatus) == 0 && resp.Status >= 500:
+		d.Err = fmt.Sprintf("application answered %d%s", resp.Status, bodySuffix(resp.Body))
+	}
+	return d
 }
 
 func failed(res *Result, reason string) *Result {
@@ -131,4 +161,14 @@ func bodySuffix(b []byte) string {
 		s = string(r[:200]) + "…"
 	}
 	return ": " + s
+}
+
+// newHTTPClient never goes through HTTP_PROXY: that variable is meant for the
+// application under test, and stillright's own deliveries must reach it
+// directly.
+func newHTTPClient(timeout time.Duration) *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.Proxy = nil
+	tr.MaxIdleConnsPerHost = 64
+	return &http.Client{Timeout: timeout, Transport: tr}
 }

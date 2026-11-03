@@ -6,46 +6,80 @@ import (
 	"time"
 
 	"github.com/stillright/stillright/internal/invariant"
+	"github.com/stillright/stillright/internal/perturb"
 	"github.com/stillright/stillright/internal/runner"
 	"github.com/stillright/stillright/internal/scenario"
 )
 
 func str(s string) *string { return &s }
 
-func TestTerminal(t *testing.T) {
-	sc := &scenario.Scenario{
+func testScenario() *scenario.Scenario {
+	return &scenario.Scenario{
 		Name: "payment-confirmed", Path: "stillright/payment.yaml",
 		Setup:   scenario.Setup{Reset: scenario.ResetTruncate, ResetTables: []string{"subscriptions", "payments"}, SQLFile: "fixtures/seed.sql"},
+		Events:  []scenario.Event{{ID: "paid"}, {ID: "refunded", After: "paid"}},
+		Perturb: scenario.Perturb{Duplicate: 3, Concurrency: 5, Reorder: true, DelayMS: []int{0, 250}},
+		Invariants: []scenario.Invariant{
+			{Name: "refund leaves no active subscription"},
+			{Name: "one active subscription per customer"},
+			{Name: "bad"},
+		},
 		Effects: []scenario.Effect{{Name: "e", Assert: "count() <= 1"}},
 	}
+}
+
+func TestTerminalStopsAtFailure(t *testing.T) {
+	sc := testScenario()
+	seq := perturb.Sequence{Index: 37, Batches: []perturb.Batch{
+		{{Event: 0}, {Event: 0, Delay: 120 * time.Millisecond}},
+		{{Event: 1}},
+	}}
+	fail := invariant.Result{Name: "one active subscription per customer", Status: invariant.Fail, Evidence: invariant.Rows{
+		Columns: []string{"customer_id", "count", "note"},
+		Values:  [][]*string{{str("42"), str("2"), nil}, {str("7"), str("3"), str(strings.Repeat("x", 80))}},
+		Total:   12,
+	}}
 	res := &runner.Result{
 		Scenario: sc,
+		Sequence: seq,
 		Deliveries: []runner.Delivery{
-			{EventID: "paid", Method: "POST", Path: "/webhooks/payment", Status: 200, Duration: 14 * time.Millisecond},
-			{EventID: "refunded", Method: "POST", Path: "/webhooks/payment", Status: 409, Duration: 9 * time.Millisecond},
+			{EventID: "paid", Method: "POST", Path: "/webhooks/payment", Batch: 0, Status: 200, Duration: 14 * time.Millisecond},
+			{EventID: "paid", Method: "POST", Path: "/webhooks/payment", Batch: 0, Delay: 120 * time.Millisecond, Status: 200, Duration: 11 * time.Millisecond},
+			{EventID: "refunded", Method: "POST", Path: "/webhooks/payment", Batch: 1, Status: 409, Duration: 9 * time.Millisecond},
 		},
 		Invariants: []invariant.Result{
 			{Name: "refund leaves no active subscription", Status: invariant.Pass},
-			{Name: "one active subscription per customer", Status: invariant.Fail, Evidence: invariant.Rows{
-				Columns: []string{"customer_id", "count", "note"},
-				Values:  [][]*string{{str("42"), str("2"), nil}, {str("7"), str("3"), str(strings.Repeat("x", 80))}},
-				Total:   12,
-			}},
+			fail,
 			{Name: "bad", Status: invariant.Error, Reason: "query failed: column nope does not exist"},
+		},
+	}
+	ex := &runner.Exploration{
+		Scenario: sc, Seed: 8812, Planned: 200, Executed: 38, Errored: 1, First: res,
+		Invariants: []runner.InvariantStats{
+			{Name: "refund leaves no active subscription"},
+			{Name: "one active subscription per customer", Failed: 1, FirstFailure: &fail, FirstSequence: seq},
+			{Name: "bad", Errored: 1, FirstError: "query failed: column nope does not exist"},
 		},
 	}
 
 	var b strings.Builder
-	Terminal(&b, res)
+	Terminal(&b, ex)
 	want := `scenario  payment-confirmed  (stillright/payment.yaml)
-reset     truncate subscriptions, payments
+seed      8812
+perturb   duplicate up to 3×, up to 5 concurrent, reorder (may violate after), delay 0–250ms
+runs      200 sequences (sequence 0 is the declared order)
+reset     truncate subscriptions, payments, before every sequence
 setup     fixtures/seed.sql
-events    paid      POST /webhooks/payment  → 200  (14ms)
-          refunded  POST /webhooks/payment  → 409  (9ms)
 note      1 effect assertion(s) not checked: effects are not supported in this version yet
+
+sequence 37: [paid ‖ paid+120ms] → [refunded]
+  batch 1   paid      POST /webhooks/payment  → 200  (14ms)
+            paid      POST /webhooks/payment  → 200  (11ms)  after 120ms
+  batch 2   refunded  POST /webhooks/payment  → 409  (9ms)
 
 PASS   refund leaves no active subscription
 FAIL   one active subscription per customer
+       failed in 1 of 38 sequences; first in sequence 37: [paid ‖ paid+120ms] → [refunded]
        12 rows returned (showing first 2)
        customer_id | count | note
        ------------+-------+-------------------------------------------------------------
@@ -55,23 +89,53 @@ ERROR  bad
        query failed: column nope does not exist
 
 1 passed, 1 failed, 1 errors
+38 of 200 sequences run: 37 passed, 0 failed, 1 could not be verified
+stopped at the first sequence that did not pass; use --keep-going to run them all
 `
 	if got := b.String(); got != want {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
 
-func TestTerminalRunError(t *testing.T) {
-	sc := &scenario.Scenario{Name: "s", Path: "s.yaml", Setup: scenario.Setup{Reset: scenario.ResetNone}}
+func TestTerminalSequenceError(t *testing.T) {
+	sc := testScenario()
+	sc.Perturb = scenario.Perturb{}
+	reason := `event "paid": no response from http://app: connection refused`
 	res := &runner.Result{
 		Scenario:   sc,
-		Error:      "cannot connect to database: connection refused",
-		Invariants: []invariant.Result{{Name: "a", Status: invariant.Error, Reason: "not checked: cannot connect to database: connection refused"}},
+		Sequence:   perturb.Baseline(sc),
+		Deliveries: []runner.Delivery{{EventID: "paid", Method: "POST", Path: "/p"}},
+		Error:      reason,
+	}
+	ex := &runner.Exploration{Scenario: sc, Seed: 1, Planned: 1, Executed: 1, Errored: 1, First: res}
+	for _, inv := range sc.Invariants {
+		ex.Invariants = append(ex.Invariants, runner.InvariantStats{Name: inv.Name, Errored: 1, FirstError: "not checked: " + reason})
+	}
+
+	var b strings.Builder
+	Terminal(&b, ex)
+	got := b.String()
+	for _, w := range []string{
+		"perturb   none\nruns      1 (declared order only)\n",
+		"sequence 0 (declared order): [paid] → [refunded]\n  batch 1   paid  POST /p  → no response  (0s)\n",
+		"\nERROR  sequence could not be verified: " + reason + "\n\nERROR  refund leaves no active subscription\nERROR  one active",
+		"0 passed, 0 failed, 3 errors\n1 of 1 sequences run: 0 passed, 0 failed, 1 could not be verified\n",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
+	}
+}
+
+func TestTerminalCouldNotStart(t *testing.T) {
+	sc := testScenario()
+	ex := &runner.Exploration{Scenario: sc, Seed: 1, Planned: 100, Error: "cannot connect to database: connection refused"}
+	for _, inv := range sc.Invariants {
+		ex.Invariants = append(ex.Invariants, runner.InvariantStats{Name: inv.Name})
 	}
 	var b strings.Builder
-	Terminal(&b, res)
-	got := b.String()
-	if !strings.Contains(got, "ERROR  run could not be verified: cannot connect to database: connection refused\n\nERROR  a\n\n0 passed, 0 failed, 1 errors") {
-		t.Errorf("got:\n%s", got)
+	Terminal(&b, ex)
+	if !strings.Contains(b.String(), "ERROR  could not start: cannot connect to database: connection refused\n\nERROR  refund") {
+		t.Errorf("got:\n%s", b.String())
 	}
 }

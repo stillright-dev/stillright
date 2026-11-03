@@ -20,6 +20,7 @@ events:
       path: /webhooks/payment
       body_file: fixtures/refunded.json
     after: paid
+    accept_status: [200, 409, 500]
 perturb:
   duplicate: 3
   concurrency: 5

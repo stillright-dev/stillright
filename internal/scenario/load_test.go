@@ -55,6 +55,9 @@ func TestLoadValid(t *testing.T) {
 	if !strings.Contains(string(paid.Body), "payment.received") {
 		t.Errorf("body not loaded: %q", paid.Body)
 	}
+	if got := sc.Events[1].AcceptStatus; len(got) != 3 || got[2] != 500 {
+		t.Errorf("accept_status = %v", got)
+	}
 	if sc.Events[1].After != "paid" {
 		t.Errorf("after = %q", sc.Events[1].After)
 	}
@@ -154,6 +157,16 @@ func TestErrors(t *testing.T) {
 			name: "missing body file",
 			src:  strings.Replace(minimal, "{ method: POST, path: /a }", "{ method: POST, path: /a, body_file: nope.json }", 1),
 			want: []string{`events[0].request.body_file: file "nope.json" not found`},
+		},
+		{
+			name: "bad accept_status",
+			src:  strings.Replace(minimal, "    request: { method: POST, path: /a }\n", "    request: { method: POST, path: /a }\n    accept_status: [200, 99]\n", 1),
+			want: []string{"s.yaml:9: events[0].accept_status[1]: 99 is not an HTTP status code"},
+		},
+		{
+			name: "empty accept_status",
+			src:  strings.Replace(minimal, "    request: { method: POST, path: /a }\n", "    request: { method: POST, path: /a }\n    accept_status: []\n", 1),
+			want: []string{"s.yaml:9: events[0].accept_status: must list at least one status code"},
 		},
 		{
 			name: "duplicate id and unknown after",

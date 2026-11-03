@@ -44,6 +44,9 @@ type Event struct {
 	ID      string  `yaml:"id"`
 	Request Request `yaml:"request"`
 	After   string  `yaml:"after"`
+	// AcceptStatus lists the response codes that count as a delivery the
+	// application handled. When empty, anything below 500 is accepted.
+	AcceptStatus []int `yaml:"accept_status"`
 }
 
 type Request struct {
