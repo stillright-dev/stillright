@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/stillright-dev/stillright/internal/effects"
@@ -129,6 +130,11 @@ func (e *Exploration) ExitCode() int {
 // Explore connects to the scenario's database and application and runs the
 // planned sequences.
 func Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Exploration {
+	if err := checkDisposable(sc, os.Getenv); err != nil {
+		ex := newExploration(sc, opts)
+		ex.Error = err.Error()
+		return ex
+	}
 	store, err := OpenPostgres(ctx, sc.Target.DatabaseURL)
 	if err != nil {
 		ex := newExploration(sc, opts)
