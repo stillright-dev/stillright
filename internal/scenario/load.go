@@ -16,6 +16,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/stillright-dev/stillright/internal/effects"
+	"github.com/stillright-dev/stillright/internal/mongoquery"
 )
 
 // Error is a single problem found in a scenario file.
@@ -268,8 +269,17 @@ func (v *validator) validate(sc *Scenario) {
 			v.fail(p("invariants", i, "name"), "duplicate invariant name %q", inv.Name)
 		}
 		seen[inv.Name] = true
+		if sc.Target.Database == MongoDB {
+			v.validateMongoInvariant(inv, i)
+			continue
+		}
 		if strings.TrimSpace(inv.SQL) == "" {
 			v.fail(p("invariants", i, "sql"), "is required")
+		}
+		for _, k := range []string{"collection", "pipeline", "filter"} {
+			if v.has("invariants", i, k) {
+				v.fail(p("invariants", i, k), "is for MongoDB; database_url is PostgreSQL (use sql)")
+			}
 		}
 	}
 
@@ -335,6 +345,54 @@ func (v *validator) validateEffects(sc *Scenario, names map[string]bool) {
 	}
 }
 
+// validateMongoInvariant checks a collection plus exactly one of pipeline or
+// filter, refuses operators that write or run JavaScript, and stores the
+// query as Extended JSON.
+func (v *validator) validateMongoInvariant(inv *Invariant, i int) {
+	if v.has("invariants", i, "sql") {
+		v.fail(p("invariants", i, "sql"), "is for PostgreSQL; database_url is MongoDB (use collection with pipeline or filter)")
+	}
+	if !validCollection(inv.Collection) {
+		v.fail(p("invariants", i, "collection"), "is required: the collection to query (got %q)", inv.Collection)
+	}
+	hasPipe, hasFilter := v.has("invariants", i, "pipeline"), v.has("invariants", i, "filter")
+	switch {
+	case hasPipe == hasFilter:
+		v.fail(p("invariants", i), "needs exactly one of pipeline or filter")
+		return
+	case hasPipe && inv.Pipeline.Kind != yaml.SequenceNode:
+		v.fail(p("invariants", i, "pipeline"), "must be a list of stages, like - $match: {...}")
+		return
+	case hasFilter && inv.Filter.Kind != yaml.MappingNode:
+		v.fail(p("invariants", i, "filter"), "must be a document, like { status: ativa }")
+		return
+	}
+	field, n := "pipeline", &inv.Pipeline
+	if hasFilter {
+		field, n = "filter", &inv.Filter
+	}
+	if key, line, why := mongoquery.Forbidden(n); key != "" {
+		v.errs = append(v.errs, Error{File: v.file, Line: line, Field: fieldName(p("invariants", i, field)),
+			Msg: fmt.Sprintf("%s is not allowed in an invariant: it %s", key, why)})
+		return
+	}
+	js, err := mongoquery.JSON(n)
+	if err == nil && hasPipe {
+		_, err = mongoquery.ParsePipeline(js)
+		inv.PipelineJSON = js
+	} else if err == nil {
+		_, err = mongoquery.ParseFilter(js)
+		inv.FilterJSON = js
+	}
+	if err != nil {
+		v.fail(p("invariants", i, field), "%v", err)
+	}
+}
+
+func validCollection(name string) bool {
+	return name != "" && !strings.ContainsAny(name, "$\x00") && !strings.HasPrefix(name, "system.")
+}
+
 func (v *validator) validateTarget(sc *Scenario) {
 	t := &sc.Target
 	t.BaseURL = v.expand(t.BaseURL, p("target", "base_url"))
@@ -346,13 +404,31 @@ func (v *validator) validateTarget(sc *Scenario) {
 		v.fail(p("target", "base_url"), "must start with http:// or https:// (got %q)", t.BaseURL)
 	}
 	t.BaseURL = strings.TrimRight(t.BaseURL, "/")
-	if t.DatabaseURL == "" {
+	t.Database = Postgres
+	switch {
+	case t.DatabaseURL == "":
 		v.fail(p("target", "database_url"), "is required")
+	case mongoquery.IsURI(t.DatabaseURL):
+		t.Database = MongoDB
+		if u, err := mongoquery.ParseURI(t.DatabaseURL); err != nil {
+			v.fail(p("target", "database_url"), "invalid MongoDB URI: %v", err)
+		} else if u.Database == "" {
+			v.fail(p("target", "database_url"), "a MongoDB URI must name the database, like mongodb://localhost/app")
+		}
 	}
 }
 
 func (v *validator) validateSetup(sc *Scenario) {
 	s := &sc.Setup
+	if sc.Target.Database == MongoDB {
+		v.validateMongoSetup(sc)
+		return
+	}
+	for _, k := range []string{"seed", "reset_collections"} {
+		if v.has("setup", k) {
+			v.fail(p("setup", k), "is for MongoDB; database_url is PostgreSQL (use %s)", map[string]string{"seed": "sql", "reset_collections": "reset_tables"}[k])
+		}
+	}
 	if s.SQLFile != "" {
 		s.SQL = string(v.readFile(sc.Dir, s.SQLFile, p("setup", "sql")))
 	}
@@ -372,6 +448,42 @@ func (v *validator) validateSetup(sc *Scenario) {
 	for i, t := range s.ResetTables {
 		if !tableNameRe.MatchString(t) {
 			v.fail(p("setup", "reset_tables", i), "%q is not a plain table name (letters, digits, _; optionally schema.table)", t)
+		}
+	}
+}
+
+func (v *validator) validateMongoSetup(sc *Scenario) {
+	s := &sc.Setup
+	for _, k := range []string{"sql", "reset_tables"} {
+		if v.has("setup", k) {
+			v.fail(p("setup", k), "is for PostgreSQL; database_url is MongoDB (use %s)", map[string]string{"sql": "seed", "reset_tables": "reset_collections"}[k])
+		}
+	}
+	if s.SeedFile != "" {
+		data := v.readFile(sc.Dir, s.SeedFile, p("setup", "seed"))
+		if data != nil {
+			if _, err := mongoquery.ParseSeed(data); err != nil {
+				v.fail(p("setup", "seed"), "%s: %v", s.SeedFile, err)
+			}
+			s.Seed = string(data)
+		}
+	}
+	switch s.Reset {
+	case "":
+		s.Reset = ResetNone
+	case ResetNone, ResetTruncate:
+	default:
+		v.fail(p("setup", "reset"), "must be %q or %q (got %q)", ResetTruncate, ResetNone, s.Reset)
+	}
+	switch {
+	case s.Reset == ResetTruncate && len(s.ResetCollections) == 0:
+		v.fail(p("setup", "reset_collections"), "is required when reset is %q", ResetTruncate)
+	case s.Reset != ResetTruncate && len(s.ResetCollections) > 0:
+		v.fail(p("setup", "reset"), "reset_collections is set but reset is %q; use reset: %s", s.Reset, ResetTruncate)
+	}
+	for i, c := range s.ResetCollections {
+		if !validCollection(c) {
+			v.fail(p("setup", "reset_collections", i), "%q is not a valid collection name", c)
 		}
 	}
 }

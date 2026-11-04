@@ -5,7 +5,17 @@
 // deliveries, and the invariants that must hold afterwards.
 package scenario
 
-import "github.com/stillright-dev/stillright/internal/effects"
+import (
+	"gopkg.in/yaml.v3"
+
+	"github.com/stillright-dev/stillright/internal/effects"
+)
+
+// Database kinds, from the scheme of target.database_url.
+const (
+	Postgres = "postgres"
+	MongoDB  = "mongodb"
+)
 
 // DefaultProxyListen is where the effects proxy listens when the scenario
 // has effects but does not say where.
@@ -51,6 +61,8 @@ func (sc *Scenario) Checks() []string {
 type Target struct {
 	BaseURL     string `yaml:"base_url"`
 	DatabaseURL string `yaml:"database_url"`
+	// Database is Postgres or MongoDB, decided by DatabaseURL's scheme.
+	Database string `yaml:"-"`
 }
 
 // Reset modes for Setup.Reset.
@@ -60,17 +72,31 @@ const (
 )
 
 type Setup struct {
-	SQLFile     string   `yaml:"sql"`
-	SQL         string   `yaml:"-"` // contents of SQLFile
-	Reset       string   `yaml:"reset"`
-	ResetTables []string `yaml:"reset_tables"`
+	SQLFile string `yaml:"sql"` // PostgreSQL: SQL statements
+	SQL     string `yaml:"-"`   // contents of SQLFile
+	// SeedFile is MongoDB's setup: a JSON object of collection: [documents].
+	SeedFile         string   `yaml:"seed"`
+	Seed             string   `yaml:"-"` // contents of SeedFile
+	Reset            string   `yaml:"reset"`
+	ResetTables      []string `yaml:"reset_tables"`      // PostgreSQL
+	ResetCollections []string `yaml:"reset_collections"` // MongoDB
 }
 
-// ResetTargets is what reset empties.
-func (s Setup) ResetTargets() []string { return s.ResetTables }
+// ResetTargets is what reset empties: tables or collections.
+func (s Setup) ResetTargets() []string {
+	if len(s.ResetCollections) > 0 {
+		return s.ResetCollections
+	}
+	return s.ResetTables
+}
 
 // Script returns the setup file and its contents, empty when there is none.
-func (s Setup) Script() (file, content string) { return s.SQLFile, s.SQL }
+func (s Setup) Script() (file, content string) {
+	if s.SeedFile != "" {
+		return s.SeedFile, s.Seed
+	}
+	return s.SQLFile, s.SQL
+}
 
 type Event struct {
 	ID      string  `yaml:"id"`
@@ -96,9 +122,17 @@ type Perturb struct {
 	DelayMS     []int `yaml:"delay_ms"`
 }
 
+// Invariant is a query that must return nothing: SQL for PostgreSQL, or a
+// collection with an aggregation pipeline or a find filter for MongoDB.
 type Invariant struct {
-	Name string `yaml:"name"`
-	SQL  string `yaml:"sql"`
+	Name       string    `yaml:"name"`
+	SQL        string    `yaml:"sql"`
+	Collection string    `yaml:"collection"`
+	Pipeline   yaml.Node `yaml:"pipeline"`
+	Filter     yaml.Node `yaml:"filter"`
+	// PipelineJSON and FilterJSON are Pipeline and Filter as Extended JSON.
+	PipelineJSON string `yaml:"-"`
+	FilterJSON   string `yaml:"-"`
 }
 
 type Proxy struct {
