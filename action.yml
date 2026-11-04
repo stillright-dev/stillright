@@ -1,0 +1,67 @@
+name: Stillright
+description: Check that your app's business invariants still hold under duplicated, concurrent and reordered events.
+author: stillright-dev
+branding:
+  icon: check-circle
+  color: gray-dark
+
+inputs:
+  scenarios:
+    description: Directory with scenario files (*.yaml), or a single scenario file.
+    default: stillright
+  args:
+    description: Extra flags for every `stillright run`, e.g. "--runs 50 --seed 8812".
+    default: ""
+  reports-dir:
+    description: Where to write the JSON and HTML reports.
+    default: stillright-reports
+  upload-reports:
+    description: Upload the reports as a workflow artifact.
+    default: "true"
+  artifact-name:
+    description: Name of the uploaded artifact.
+    default: stillright-reports
+
+outputs:
+  exit-code:
+    description: 0 if everything passed, 1 if something failed, 2 if something could not be verified.
+    value: ${{ steps.run.outputs.exit-code }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: ${{ github.action_path }}/go.mod
+        cache-dependency-path: ${{ github.action_path }}/go.sum
+
+    - name: Build stillright
+      shell: bash
+      run: |
+        cd "$GITHUB_ACTION_PATH"
+        go build -o "$RUNNER_TEMP/stillright-bin/stillright" ./cmd/stillright
+        echo "$RUNNER_TEMP/stillright-bin" >> "$GITHUB_PATH"
+
+    - name: Run scenarios
+      id: run
+      shell: bash
+      continue-on-error: true
+      env:
+        SR_SCENARIOS: ${{ inputs.scenarios }}
+        SR_ARGS: ${{ inputs.args }}
+        SR_REPORTS_DIR: ${{ inputs.reports-dir }}
+      run: bash "$GITHUB_ACTION_PATH/scripts/action-run.sh"
+
+    - name: Upload reports
+      if: always() && inputs.upload-reports == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.reports-dir }}
+        if-no-files-found: warn
+
+    - name: Result
+      shell: bash
+      env:
+        CODE: ${{ steps.run.outputs.exit-code }}
+      run: exit "${CODE:-2}"
