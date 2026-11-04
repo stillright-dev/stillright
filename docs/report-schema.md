@@ -104,7 +104,7 @@ A check can be `FAIL` and still have `errored_runs > 0`. The top-level
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `columns` | array of string | column names (for effects: `method`, `host`, `path`, `body`) |
-| `rows` | array of arrays of string or null | at most 10 rows, values in PostgreSQL's text format. `null` is SQL NULL |
+| `rows` | array of arrays of string or null | at most 10 rows. PostgreSQL values use its text format and `null` is SQL NULL. MongoDB columns are top-level document fields, values are relaxed Extended JSON (strings as-is), and `null` is a missing field |
 | `total` | integer | how many rows there were in total |
 
 ### Run

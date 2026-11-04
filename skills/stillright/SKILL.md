@@ -1,22 +1,24 @@
 ---
 name: stillright
-description: Test that an app's business rules still hold when its webhooks or HTTP events are duplicated, concurrent or out of order, using the stillright CLI. Use when the user wants to test webhook idempotency, double charges, race conditions in payment/subscription/order handlers, out-of-order events (refund before payment), duplicate e-mails or other side effects; when they mention stillright, invariants or stillright/*.yaml scenarios; or when you have just written or changed a webhook or event handler backed by PostgreSQL and should prove it is safe under redelivery. Covers writing scenarios and invariants from the app's code, running them, reading report.json, fixing what breaks and adding the GitHub Action.
+description: Test that an app's business rules still hold when its webhooks or HTTP events are duplicated, concurrent or out of order, using the stillright CLI (PostgreSQL or MongoDB). Use when the user wants to test webhook idempotency, double charges, race conditions in payment/subscription/order handlers, out-of-order events (refund before payment), duplicate e-mails or other side effects; when they mention stillright, invariants or stillright/*.yaml scenarios; or when you have just written or changed a webhook or event handler backed by PostgreSQL or MongoDB and should prove it is safe under redelivery. Covers writing scenarios and invariants from the app's code, running them, reading report.json, fixing what breaks and adding the GitHub Action.
 ---
 
 # Stillright
 
 Stillright delivers an app's events the way real gateways do: duplicated,
 concurrent and reordered. After every run it checks **invariants**, which
-are SQL queries that must return zero rows. When one breaks, it shrinks the
+are queries that must return nothing: SQL for PostgreSQL, or an
+aggregation pipeline or find filter for MongoDB. When one breaks, it shrinks the
 failure to the smallest sequence that still breaks it, such as
 `[pago ‖ pago]` or `[estornado] → [pago]`.
 
-It is black-box. It talks to the app over HTTP and to its PostgreSQL over
-SQL, and the app's code needs no changes to be tested.
+It is black-box. It talks to the app over HTTP and to its database
+directly, and the app's code needs no changes to be tested.
 
 ## Safety first
 
-Stillright **truncates the tables in `reset_tables` before every run**.
+Stillright **empties the tables in `reset_tables` (PostgreSQL) or the
+collections in `reset_collections` (MongoDB) before every run**.
 Before running anything:
 
 1. Find the `DATABASE_URL` the scenario uses (`target.database_url`, usually
@@ -46,8 +48,8 @@ in the background and wait for it to answer before running scenarios.
 
 ### 1. Understand the handlers
 
-Read the webhook/event handlers and the schema (migrations, `schema.sql`,
-ORM models). For each handler, note:
+Read the webhook/event handlers and the schema: migrations, `schema.sql`,
+ORM models, or Mongoose schemas and `createIndex` calls for MongoDB. For each handler, note:
 
 - what the gateway sends (event types, the ids it carries: event id,
   payment id, customer id);
@@ -104,6 +106,41 @@ invariants:
       SELECT customer_id, count(*) AS active FROM subscriptions
       WHERE status = 'active' GROUP BY 1 HAVING count(*) > 1
 ```
+
+#### MongoDB
+
+When `database_url` is `mongodb://…/db` or `mongodb+srv://…/db`, three
+parts of the scenario change: the setup, the reset and the invariants.
+
+```yaml
+setup:
+  seed: fixtures/seed.json          # {"clientes": [{"_id": 42, "nome": "Ana"}]}, Extended JSON
+  reset: truncate                   # deleteMany({}); indexes are kept
+  reset_collections: [clientes, assinaturas, pagamentos]
+invariants:
+  - name: one active subscription per customer
+    collection: assinaturas
+    pipeline:
+      - $match: { status: ativa }
+      - $group: { _id: $cliente_id, ativas: { $sum: 1 }, ids: { $push: $_id } }
+      - $match: { ativas: { $gt: 1 } }
+  - name: refunded payment leaves no active subscription
+    collection: assinaturas
+    filter: { status: ativa, estornada: true }
+```
+
+Rules for MongoDB invariants:
+
+- Use a pipeline (`$group` + `$match`) for "more than one" rules and
+  `$lookup` across collections. Use a filter for "this must not exist".
+- `$out`, `$merge`, `$where`, `$function` and `$accumulator` are refused.
+- Extended JSON works inside queries, for example `{ $oid: "…" }`.
+- Missing unique indexes are a classic MongoDB bug. Check what the app
+  creates with `createIndex` / `unique: true`.
+
+Full details are in `docs/mongodb.md` in the stillright repository.
+
+#### Writing good invariants
 
 Each invariant selects the bad state: "what must never be true?". Good ones
 for payment-like flows:
@@ -190,9 +227,15 @@ the database guard.
 1. Explain the bug to the user with the smallest sequence and the evidence.
 2. Fix the app, not the scenario. Prefer database guarantees plus
    idempotent handlers:
-   - unique constraints or partial unique indexes;
-   - `INSERT ... ON CONFLICT` on the event or external id;
-   - a row lock (`SELECT ... FOR UPDATE`) to serialize events for one owner;
+   - unique constraints or partial unique indexes (MongoDB: a unique index,
+     with `partialFilterExpression` for "one active per customer");
+   - `INSERT ... ON CONFLICT` on the event or external id (MongoDB:
+     `updateOne(..., {$setOnInsert}, {upsert: true})` on the external id, or
+     an insert that treats the duplicate-key error 11000 as "already
+     processed");
+   - a row lock (`SELECT ... FOR UPDATE`) to serialize events for one owner
+     (MongoDB: a transaction, or a conditional `findOneAndUpdate` acting as
+     the claim);
    - handlers that tolerate any order;
    - side effects claimed inside the transaction and sent after commit (or
      an outbox).

@@ -13,7 +13,8 @@ write business rules as SQL **invariants**. Stillright delivers your webhooks
 the way real gateways do and checks those rules after every run.
 
 It is black-box and works with any language: it talks to your app over HTTP
-and to its database over SQL. You don't change a line of application code.
+and to its database, PostgreSQL or [MongoDB](docs/mongodb.md). You don't
+change a line of application code.
 
 ## Why
 
@@ -50,8 +51,10 @@ FAIL   uma assinatura ativa por cliente
    are duplicated (up to `duplicate` times), sent in concurrent batches
    (released together behind a barrier), reordered (violating `after`) and
    delayed. Sequence 0 is always the plain declared order.
-3. **Check.** Run every invariant, a SQL query that must return **zero
-   rows**, in a read-only transaction. Any rows returned are the evidence.
+3. **Check.** Run every invariant, a query that must return **zero
+   rows**. In PostgreSQL that is SQL in a read-only transaction; in MongoDB,
+   an aggregation pipeline or find filter. Any rows or documents returned
+   are the evidence.
    Optionally, check the app's outbound calls (e-mails, API calls) recorded
    by a local stub proxy.
 4. **Shrink.** When something breaks, reduce the sequence to the smallest one
@@ -77,8 +80,9 @@ git clone https://github.com/stillright-dev/stillright && cd stillright
 go build -o stillright ./cmd/stillright
 ```
 
-You also need PostgreSQL. Use a **disposable** database: Stillright
-truncates the tables you list before every run.
+You also need the app's database, PostgreSQL or MongoDB. Use a
+**disposable** one: Stillright empties the tables or collections you list
+before every run.
 
 **Database guard.** Some scenarios write to the database: they truncate
 tables or run seed SQL. Stillright runs those only against databases that
@@ -177,6 +181,10 @@ effects:
   - name: no máximo um e-mail de boas-vindas
     assert: count(host == "api.email.local" && path == "/send") <= 1
 ```
+
+Using MongoDB? The scenario is the same except for `setup` (`seed` and
+`reset_collections`) and the invariants (a `collection` with a `pipeline`
+or `filter`). See [docs/mongodb.md](docs/mongodb.md).
 
 Relative paths resolve against the scenario file. Every mistake is reported
 with its line and field, all at once:
@@ -284,8 +292,8 @@ duplicate and out-of-order deliveries"*.
 
 Stillright v0.1 is useful, but it does not do everything:
 
-- **PostgreSQL and HTTP only.** No MySQL and no queues (Kafka, SQS…). Events
-  must be HTTP requests to your app.
+- **PostgreSQL, MongoDB and HTTP only.** No MySQL and no queues (Kafka,
+  SQS…). Events must be HTTP requests to your app.
 - **Black-box only.** It changes what your app *receives*: duplicates,
   concurrency, order and delays. It does not crash your process, cut its
   network or slow its database. Bugs that need those stay hidden.
@@ -298,7 +306,9 @@ Stillright v0.1 is useful, but it does not do everything:
   help, but nothing guarantees it.
 - **Shrinking is greedy and bounded** (60 candidates per failure). The result
   is small and confirmed to fail, but not always the absolute minimum.
-- **`reset: truncate` really truncates** (`RESTART IDENTITY CASCADE`). The
+- **`reset: truncate` really empties your data.** It runs
+  `TRUNCATE … RESTART IDENTITY CASCADE` in PostgreSQL and `deleteMany({})`
+  in MongoDB. The
   database guard catches the obvious mistakes, but it is a heuristic: a
   local database or one named `*_test` is assumed to be disposable. Never
   point a scenario at a database you care about.

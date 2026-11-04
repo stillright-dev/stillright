@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **MongoDB.** A `mongodb://` or `mongodb+srv://` `database_url` makes a
+  scenario a MongoDB one:
+  - invariants are an aggregation `pipeline` or a find `filter` on a
+    `collection`, and must return no documents;
+  - setup uses a `seed` JSON file and `reset_collections`, and the reset
+    keeps indexes;
+  - `$out`, `$merge`, `$where`, `$function` and `$accumulator` are refused.
+
+  See `docs/mongodb.md`.
+
 - **Database guard.** Scenarios that truncate tables or run setup SQL are
   refused when the database does not look disposable: not local, not a
   single-label service host, and no test marker in its name. To allow one
