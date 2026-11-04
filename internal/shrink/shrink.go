@@ -21,10 +21,16 @@ type Result struct {
 }
 
 // Shrink greedily applies the first reduction that still fails and starts
-// over, until no reduction fails or budget candidates have been tried. Each
-// accepted step removes a send, or merges two batches, or removes a delay, so
-// the process always terminates. Reductions are tried in a fixed order, so
-// with a repeatable oracle the result is deterministic.
+// over, until no reduction fails or budget candidates have been tried.
+//
+// Sequential deliveries are preferred over concurrent ones: a batch is only
+// kept concurrent when splitting it makes the failure go away, so an ordering
+// bug shrinks to "[refunded] → [paid]" while a race stays "[paid ‖ paid]".
+//
+// Each accepted step removes a send, or moves a send out of a concurrent
+// batch, or removes a delay, so the process always terminates. Reductions are
+// tried in a fixed order, so with a repeatable oracle the result is
+// deterministic.
 func Shrink(seq perturb.Sequence, fails Oracle, budget int) Result {
 	res := Result{Sequence: seq}
 	for {
@@ -48,13 +54,14 @@ func Shrink(seq perturb.Sequence, fails Oracle, budget int) Result {
 	}
 }
 
-// candidates lists the one-step reductions of seq, cheapest wins first:
-// dropping every delay at once makes later runs faster, then whole batches,
-// single sends, merged neighbours and finally single delays.
+// candidates lists the one-step reductions of seq, biggest wins first:
+// dropping every delay at once (which also makes later runs faster), whole
+// batches, single sends, making everything sequential, moving one send out of
+// a concurrent batch and finally single delays.
 func candidates(seq perturb.Sequence) []perturb.Sequence {
 	var out []perturb.Sequence
 
-	if hasDelay(seq) {
+	if countDelays(seq) > 0 {
 		out = append(out, edit(seq, func(bs []perturb.Batch) []perturb.Batch {
 			for _, b := range bs {
 				for j := range b {
@@ -84,11 +91,35 @@ func candidates(seq perturb.Sequence) []perturb.Sequence {
 			}
 		}
 	}
-	for i := 0; i+1 < len(seq.Batches); i++ {
+	if concurrency(seq) > 1 {
 		out = append(out, edit(seq, func(bs []perturb.Batch) []perturb.Batch {
-			bs[i] = append(bs[i], bs[i+1]...)
-			return append(bs[:i+1], bs[i+2:]...)
+			var flat []perturb.Batch
+			for _, b := range bs {
+				for _, s := range b {
+					flat = append(flat, perturb.Batch{s})
+				}
+			}
+			return flat
 		}))
+	}
+	for i, b := range seq.Batches {
+		if len(b) < 2 {
+			continue
+		}
+		for j := range b {
+			// Send j alone, right before or right after the rest of its batch.
+			for _, before := range []bool{true, false} {
+				out = append(out, edit(seq, func(bs []perturb.Batch) []perturb.Batch {
+					alone := perturb.Batch{bs[i][j]}
+					rest := append(bs[i][:j:j], bs[i][j+1:]...)
+					pair := []perturb.Batch{rest, alone}
+					if before {
+						pair = []perturb.Batch{alone, rest}
+					}
+					return append(bs[:i], append(pair, bs[i+1:]...)...)
+				}))
+			}
+		}
 	}
 	if countDelays(seq) > 1 {
 		for i, b := range seq.Batches {
@@ -105,6 +136,15 @@ func candidates(seq perturb.Sequence) []perturb.Sequence {
 	return out
 }
 
+// concurrency is the size of the largest batch.
+func concurrency(seq perturb.Sequence) int {
+	n := 0
+	for _, b := range seq.Batches {
+		n = max(n, len(b))
+	}
+	return n
+}
+
 // edit applies f to a deep copy of seq's batches. The result is not one of
 // the generated sequences, so its index is -1.
 func edit(seq perturb.Sequence, f func([]perturb.Batch) []perturb.Batch) perturb.Sequence {
@@ -114,8 +154,6 @@ func edit(seq perturb.Sequence, f func([]perturb.Batch) []perturb.Batch) perturb
 	}
 	return perturb.Sequence{Index: -1, Batches: f(bs)}
 }
-
-func hasDelay(seq perturb.Sequence) bool { return countDelays(seq) > 0 }
 
 func countDelays(seq perturb.Sequence) int {
 	n := 0

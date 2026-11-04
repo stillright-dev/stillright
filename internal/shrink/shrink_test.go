@@ -135,3 +135,31 @@ func TestShrinkFlakyOracle(t *testing.T) {
 		t.Errorf("got %s", perturb.Format(sc, res.Sequence))
 	}
 }
+
+// refundNotAfterPaid fails when a refund is delivered no later than some
+// paid: concurrently or before. Both shapes fail; the sequential one is the
+// clearer explanation and must win.
+func refundNotAfterPaid(s perturb.Sequence) bool {
+	refundBatch := -1
+	for bi, b := range s.Batches {
+		for _, x := range b {
+			if x.Event == 1 && refundBatch < 0 {
+				refundBatch = bi
+			}
+			if x.Event == 0 && refundBatch >= 0 && refundBatch <= bi {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestShrinkPrefersSequential(t *testing.T) {
+	concurrent := perturb.Sequence{Index: 4, Batches: []perturb.Batch{
+		{{Event: 2}, {Event: 1}, {Event: 0}, {Event: 2}},
+	}}
+	res := Shrink(concurrent, refundNotAfterPaid, 1000)
+	if got := perturb.Format(sc, res.Sequence); got != "[refunded] → [paid]" {
+		t.Errorf("got %s", got)
+	}
+}
