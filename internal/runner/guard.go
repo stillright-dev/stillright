@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/stillright-dev/stillright/internal/mongoquery"
 	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
@@ -30,14 +31,18 @@ func checkDisposable(sc *scenario.Scenario, getenv func(string) string) error {
 	if !writes {
 		return nil
 	}
-	cfg, err := pgx.ParseConfig(sc.Target.DatabaseURL)
+	hosts, db, err := databaseLocation(sc)
 	if err != nil {
 		return fmt.Errorf("invalid database_url: %v", err)
 	}
-	host, db := cfg.Host, cfg.Database
-	if isLocalHost(host) || testNameRe.MatchString(db) {
+	local := true
+	for _, h := range hosts {
+		local = local && isLocalHost(h)
+	}
+	if local || testNameRe.MatchString(db) {
 		return nil
 	}
+	host := strings.Join(hosts, ",")
 	id := host + "/" + db
 	if allowed := strings.TrimSpace(getenv(AllowDatabaseEnv)); allowed == id {
 		return nil
@@ -49,6 +54,30 @@ func checkDisposable(sc *scenario.Scenario, getenv func(string) string) error {
 	return fmt.Errorf("refusing to modify database %q on %s: it does not look disposable (not local, no test "+
 		"marker in its name), and this scenario %s before every run. If it really is a throwaway "+
 		"database, run with %s=%s", db, host, action, AllowDatabaseEnv, id)
+}
+
+// databaseLocation returns the hosts (without ports) and database name a
+// scenario's database_url points to, without connecting or resolving DNS.
+func databaseLocation(sc *scenario.Scenario) ([]string, string, error) {
+	if sc.Target.Database == scenario.MongoDB {
+		u, err := mongoquery.ParseURI(sc.Target.DatabaseURL)
+		if err != nil {
+			return nil, "", err
+		}
+		var hosts []string
+		for _, h := range u.Hosts {
+			if name, _, err := net.SplitHostPort(h); err == nil {
+				h = name
+			}
+			hosts = append(hosts, h)
+		}
+		return hosts, u.Database, nil
+	}
+	cfg, err := pgx.ParseConfig(sc.Target.DatabaseURL)
+	if err != nil {
+		return nil, "", err
+	}
+	return []string{cfg.Host}, cfg.Database, nil
 }
 
 // isLocalHost reports whether host is this machine, a Unix socket, or a

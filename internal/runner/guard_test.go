@@ -90,3 +90,35 @@ func TestExploreRefusesBeforeConnecting(t *testing.T) {
 		t.Errorf("error = %q", ex.Error)
 	}
 }
+
+func TestCheckDisposableMongo(t *testing.T) {
+	noEnv := func(string) string { return "" }
+	mongo := func(url string) *scenario.Scenario {
+		sc := guardScenario(url)
+		sc.Target.Database = scenario.MongoDB
+		sc.Setup = scenario.Setup{Reset: scenario.ResetTruncate, ResetCollections: []string{"assinaturas"}}
+		return sc
+	}
+	for url, ok := range map[string]bool{
+		"mongodb://localhost:27017/app":                         true,
+		"mongodb://127.0.0.1,localhost:27018/app?replicaSet=rs": true,
+		"mongodb://mongo:27017/app":                             true, // CI service
+		"mongodb+srv://u:p@cluster0.abcd.mongodb.net/app_test":  true,
+		"mongodb+srv://u:p@cluster0.abcd.mongodb.net/app":       false,
+		"mongodb://localhost,db.example.com/app":                false, // one remote host is enough to refuse
+	} {
+		if err := checkDisposable(mongo(url), noEnv); (err == nil) != ok {
+			t.Errorf("%s: err = %v, want allowed=%v", url, err, ok)
+		}
+	}
+
+	sc := mongo("mongodb+srv://u:secret@cluster0.abcd.mongodb.net/app")
+	err := checkDisposable(sc, noEnv)
+	if err == nil || !strings.Contains(err.Error(), "STILLRIGHT_ALLOW_DATABASE=cluster0.abcd.mongodb.net/app") ||
+		!strings.Contains(err.Error(), "empties assinaturas") || strings.Contains(err.Error(), "secret") {
+		t.Errorf("err = %v", err)
+	}
+	if err := checkDisposable(sc, func(string) string { return "cluster0.abcd.mongodb.net/app" }); err != nil {
+		t.Errorf("explicitly allowed: %v", err)
+	}
+}

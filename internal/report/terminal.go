@@ -39,7 +39,11 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	}
 	switch sc.Setup.Reset {
 	case scenario.ResetTruncate:
-		fmt.Fprintf(w, "reset     truncate %s, before every sequence\n", strings.Join(sc.Setup.ResetTargets(), ", "))
+		verb := "truncate"
+		if sc.Target.Database == scenario.MongoDB {
+			verb = "delete all documents in"
+		}
+		fmt.Fprintf(w, "reset     %s %s, before every sequence\n", verb, strings.Join(sc.Setup.ResetTargets(), ", "))
 	default:
 		fmt.Fprintf(w, "reset     none (state carries over between sequences)\n")
 	}

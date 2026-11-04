@@ -135,7 +135,7 @@ func Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Explorat
 		ex.Error = err.Error()
 		return ex
 	}
-	store, err := OpenPostgres(ctx, sc.Target.DatabaseURL)
+	store, err := openStore(ctx, sc)
 	if err != nil {
 		ex := newExploration(sc, opts)
 		ex.Error = fmt.Sprintf("cannot connect to database: %v", err)
@@ -168,6 +168,14 @@ func Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Explorat
 		ex.ProxyAddr, ex.ProxyCalls, ex.ProxyHosts = proxy.Addr(), proxy.Total(), proxy.Hosts()
 	}
 	return ex
+}
+
+// openStore connects to the scenario's database, PostgreSQL or MongoDB.
+func openStore(ctx context.Context, sc *scenario.Scenario) (Store, error) {
+	if sc.Target.Database == scenario.MongoDB {
+		return OpenMongo(ctx, sc.Target.DatabaseURL)
+	}
+	return OpenPostgres(ctx, sc.Target.DatabaseURL)
 }
 
 // Explore runs sequences 0..planned-1 of opts.Seed (or opts.Only, up to
