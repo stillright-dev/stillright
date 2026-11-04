@@ -16,8 +16,14 @@ jobs:
         ports: ["5432:5432"]
         options: >-
           --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      mongo:
+        image: mongo:8
+        ports: ["27017:27017"]
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping: 1}).ok'" --health-interval 5s --health-timeout 5s --health-retries 10
     env:
       STILLRIGHT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/stillright_test?sslmode=disable
+      STILLRIGHT_TEST_MONGODB_URI: mongodb://localhost:27017/stillright_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
