@@ -19,8 +19,10 @@ jobs:
       mongo:
         image: mongo:8
         ports: ["27017:27017"]
-        options: >-
-          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping: 1}).ok'" --health-interval 5s --health-timeout 5s --health-retries 10
+        env:
+          # MongoDB 8's tcmalloc can crash on newer kernels; this is the
+          # workaround MongoDB documents.
+          GLIBC_TUNABLES: glibc.pthread.rseq=0
     env:
       STILLRIGHT_TEST_DATABASE_URL: postgres://postgres:postgres@localhost:5432/stillright_test?sslmode=disable
       STILLRIGHT_TEST_MONGODB_URI: mongodb://localhost:27017/stillright_test
@@ -31,6 +33,17 @@ jobs:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go vet ./...
+      # No container health check for MongoDB (quoting a mongosh command
+      # inside service options is fragile); wait for the port instead, and
+      # show the container's log if it never comes up.
+      - name: Wait for MongoDB
+        run: |
+          for i in $(seq 60); do
+            (echo > /dev/tcp/127.0.0.1/27017) 2>/dev/null && exit 0
+            sleep 1
+          done
+          docker logs "${{ job.services.mongo.id }}"
+          exit 1
       - run: go test -race ./...
 
   # Runs the action against the example app: the buggy version must fail every
