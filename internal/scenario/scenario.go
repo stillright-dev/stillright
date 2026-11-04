@@ -66,6 +66,12 @@ type Setup struct {
 	ResetTables []string `yaml:"reset_tables"`
 }
 
+// ResetTargets is what reset empties.
+func (s Setup) ResetTargets() []string { return s.ResetTables }
+
+// Script returns the setup file and its contents, empty when there is none.
+func (s Setup) Script() (file, content string) { return s.SQLFile, s.SQL }
+
 type Event struct {
 	ID      string  `yaml:"id"`
 	Request Request `yaml:"request"`

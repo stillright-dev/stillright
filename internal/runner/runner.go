@@ -73,13 +73,13 @@ func (r *Runner) RunSequence(ctx context.Context, sc *scenario.Scenario, seq per
 	res := &Result{Scenario: sc, Sequence: seq}
 
 	if sc.Setup.Reset == scenario.ResetTruncate {
-		if err := r.Store.Reset(ctx, sc.Setup.ResetTables); err != nil {
+		if err := r.Store.Reset(ctx, sc.Setup.ResetTargets()); err != nil {
 			return failed(res, fmt.Sprintf("reset failed: %v", err))
 		}
 	}
-	if strings.TrimSpace(sc.Setup.SQL) != "" {
-		if err := r.Store.Exec(ctx, sc.Setup.SQL); err != nil {
-			return failed(res, fmt.Sprintf("setup SQL %s failed: %v", sc.Setup.SQLFile, err))
+	if file, script := sc.Setup.Script(); strings.TrimSpace(script) != "" {
+		if err := r.Store.Setup(ctx, script); err != nil {
+			return failed(res, fmt.Sprintf("setup %s failed: %v", file, err))
 		}
 	}
 	if r.Effects != nil {

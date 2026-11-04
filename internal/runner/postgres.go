@@ -7,15 +7,17 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/stillright-dev/stillright/internal/invariant"
+	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
 // Store is the database the application under test writes to.
 type Store interface {
 	invariant.Querier
-	// Reset empties the given tables.
-	Reset(ctx context.Context, tables []string) error
-	// Exec runs a SQL script, which may hold several statements.
-	Exec(ctx context.Context, sql string) error
+	// Reset empties the given tables or collections.
+	Reset(ctx context.Context, names []string) error
+	// Setup runs the scenario's setup script: SQL statements for
+	// PostgreSQL, seed documents for MongoDB.
+	Setup(ctx context.Context, script string) error
 	Close(ctx context.Context) error
 }
 
@@ -40,15 +42,19 @@ func (p *Postgres) Reset(ctx context.Context, tables []string) error {
 	return err
 }
 
-func (p *Postgres) Exec(ctx context.Context, sql string) error {
+func (p *Postgres) Setup(ctx context.Context, sql string) error {
 	// The simple protocol accepts multi-statement scripts.
 	return p.conn.PgConn().Exec(ctx, sql).Close()
 }
 
-// QueryRows runs sql in a read-only transaction that is always rolled back,
+func (p *Postgres) Query(ctx context.Context, inv scenario.Invariant, limit int) (invariant.Rows, error) {
+	return p.queryRows(ctx, inv.SQL, limit)
+}
+
+// queryRows runs sql in a read-only transaction that is always rolled back,
 // so an invariant can never change the data it inspects. Results are fetched
 // in text format to get PostgreSQL's own rendering of every type.
-func (p *Postgres) QueryRows(ctx context.Context, sql string, limit int) (invariant.Rows, error) {
+func (p *Postgres) queryRows(ctx context.Context, sql string, limit int) (invariant.Rows, error) {
 	var out invariant.Rows
 	tx, err := p.conn.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {

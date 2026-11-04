@@ -39,12 +39,12 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	}
 	switch sc.Setup.Reset {
 	case scenario.ResetTruncate:
-		fmt.Fprintf(w, "reset     truncate %s, before every sequence\n", strings.Join(sc.Setup.ResetTables, ", "))
+		fmt.Fprintf(w, "reset     truncate %s, before every sequence\n", strings.Join(sc.Setup.ResetTargets(), ", "))
 	default:
 		fmt.Fprintf(w, "reset     none (state carries over between sequences)\n")
 	}
-	if sc.Setup.SQLFile != "" {
-		fmt.Fprintf(w, "setup     %s\n", sc.Setup.SQLFile)
+	if file, _ := sc.Setup.Script(); file != "" {
+		fmt.Fprintf(w, "setup     %s\n", file)
 	}
 	if sc.SettleMS > 0 {
 		fmt.Fprintf(w, "settle    %dms after the last delivery\n", sc.SettleMS)

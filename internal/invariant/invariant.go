@@ -13,14 +13,15 @@ import (
 // MaxEvidenceRows is how many violating rows are kept per failed invariant.
 const MaxEvidenceRows = 10
 
-// Querier runs a read-only query and returns up to limit rows of it, along
-// with the total row count.
+// Querier runs an invariant's read-only query and returns up to limit rows
+// of its result, along with the total row count.
 type Querier interface {
-	QueryRows(ctx context.Context, sql string, limit int) (Rows, error)
+	Query(ctx context.Context, inv scenario.Invariant, limit int) (Rows, error)
 }
 
 // Rows is the (possibly truncated) result of an invariant query. Values are
-// PostgreSQL's text rendering of each column; nil means NULL.
+// the database's own text rendering of each value; nil means NULL (or, for a
+// document, a missing field).
 type Rows struct {
 	Columns []string
 	Values  [][]*string
@@ -47,7 +48,7 @@ type Result struct {
 
 // Check runs a single invariant.
 func Check(ctx context.Context, q Querier, inv scenario.Invariant) Result {
-	rows, err := q.QueryRows(ctx, inv.SQL, MaxEvidenceRows)
+	rows, err := q.Query(ctx, inv, MaxEvidenceRows)
 	if err != nil {
 		return Result{Name: inv.Name, Status: Error, Reason: fmt.Sprintf("query failed: %v", err)}
 	}

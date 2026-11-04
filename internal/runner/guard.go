@@ -25,7 +25,8 @@ var testNameRe = regexp.MustCompile(`(?i)(^|[_\-.])(test|tests|testing|e2e|ci|tm
 // in its name. stillright cannot know which database is production, so it
 // errs on the side of asking.
 func checkDisposable(sc *scenario.Scenario, getenv func(string) string) error {
-	writes := sc.Setup.Reset == scenario.ResetTruncate || strings.TrimSpace(sc.Setup.SQL) != ""
+	_, script := sc.Setup.Script()
+	writes := sc.Setup.Reset == scenario.ResetTruncate || strings.TrimSpace(script) != ""
 	if !writes {
 		return nil
 	}
@@ -41,9 +42,9 @@ func checkDisposable(sc *scenario.Scenario, getenv func(string) string) error {
 	if allowed := strings.TrimSpace(getenv(AllowDatabaseEnv)); allowed == id {
 		return nil
 	}
-	action := "runs setup SQL"
+	action := "runs its setup script"
 	if sc.Setup.Reset == scenario.ResetTruncate {
-		action = "truncates " + strings.Join(sc.Setup.ResetTables, ", ")
+		action = "empties " + strings.Join(sc.Setup.ResetTargets(), ", ")
 	}
 	return fmt.Errorf("refusing to modify database %q on %s: it does not look disposable (not local, no test "+
 		"marker in its name), and this scenario %s before every run. If it really is a throwaway "+

@@ -50,12 +50,13 @@ func (f *fakeStore) Reset(_ context.Context, tables []string) error {
 	return f.resetErr
 }
 
-func (f *fakeStore) Exec(_ context.Context, sql string) error {
+func (f *fakeStore) Setup(_ context.Context, sql string) error {
 	f.log = append(f.log, "exec "+sql)
 	return f.execErr
 }
 
-func (f *fakeStore) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+func (f *fakeStore) Query(_ context.Context, inv scenario.Invariant, _ int) (invariant.Rows, error) {
+	sql := inv.SQL
 	f.log = append(f.log, "query "+sql)
 	return f.rows[sql], f.queryErr[sql]
 }
@@ -137,7 +138,7 @@ func TestRunErrors(t *testing.T) {
 		wantSent   int
 	}{
 		{"reset fails", &fakeTarget{}, &fakeStore{resetErr: errors.New("no such table")}, "reset failed: no such table", 0},
-		{"setup fails", &fakeTarget{}, &fakeStore{execErr: errors.New("syntax")}, "setup SQL seed.sql failed: syntax", 0},
+		{"setup fails", &fakeTarget{}, &fakeStore{execErr: errors.New("syntax")}, "setup seed.sql failed: syntax", 0},
 		{"app unreachable", &fakeTarget{err: errors.New("connection refused")}, &fakeStore{}, `event "first": no response from http://app: connection refused`, 1},
 		{"app 5xx", &fakeTarget{status: map[string]int{"/2": 503}}, &fakeStore{}, `event "second": application answered 503: boom at handler`, 2},
 	}
@@ -251,7 +252,8 @@ func (f *failingStore) Reset(ctx context.Context, tables []string) error {
 	return nil
 }
 
-func (f *failingStore) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+func (f *failingStore) Query(_ context.Context, inv scenario.Invariant, _ int) (invariant.Rows, error) {
+	sql := inv.SQL
 	if sql == "Q2" && f.failOn[f.runs] {
 		return invariant.Rows{Columns: []string{"id"}, Total: 1}, nil
 	}
@@ -363,7 +365,8 @@ func (a *dupApp) Reset(context.Context, []string) error {
 	return nil
 }
 
-func (a *dupApp) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+func (a *dupApp) Query(_ context.Context, inv scenario.Invariant, _ int) (invariant.Rows, error) {
+	sql := inv.SQL
 	if sql == "Q2" && a.hits >= 2 && !(a.flaky && a.runs%2 == 0) {
 		return invariant.Rows{Columns: []string{"hits"}, Values: [][]*string{{ptr(fmt.Sprint(a.hits))}}, Total: 1}, nil
 	}
@@ -444,7 +447,8 @@ func (a *onceApp) Send(context.Context, scenario.Request) (Response, error) {
 	return Response{Status: 200}, nil
 }
 func (a *onceApp) Reset(context.Context, []string) error { a.runs++; return nil }
-func (a *onceApp) QueryRows(_ context.Context, sql string, _ int) (invariant.Rows, error) {
+func (a *onceApp) Query(_ context.Context, inv scenario.Invariant, _ int) (invariant.Rows, error) {
+	sql := inv.SQL
 	if sql == "Q2" && a.runs == 1 {
 		return invariant.Rows{Columns: []string{"x"}, Total: 1}, nil
 	}

@@ -48,7 +48,7 @@ func TestCheckDisposableAllowList(t *testing.T) {
 		t.Fatal("remote database must be refused")
 	}
 	msg := err.Error()
-	for _, w := range []string{`database "postgres" on db.abcd.supabase.co`, "truncates pagamentos, assinaturas", "STILLRIGHT_ALLOW_DATABASE=db.abcd.supabase.co/postgres"} {
+	for _, w := range []string{`database "postgres" on db.abcd.supabase.co`, "empties pagamentos, assinaturas", "STILLRIGHT_ALLOW_DATABASE=db.abcd.supabase.co/postgres"} {
 		if !strings.Contains(msg, w) {
 			t.Errorf("message missing %q: %s", w, msg)
 		}
@@ -76,7 +76,7 @@ func TestCheckDisposableOnlyWhenWriting(t *testing.T) {
 		t.Errorf("read-only scenario refused: %v", err)
 	}
 	sc.Setup.SQL = "INSERT INTO x VALUES (1)"
-	if err := checkDisposable(sc, func(string) string { return "" }); err == nil || !strings.Contains(err.Error(), "runs setup SQL") {
+	if err := checkDisposable(sc, func(string) string { return "" }); err == nil || !strings.Contains(err.Error(), "runs its setup script") {
 		t.Errorf("setup SQL must be guarded too: %v", err)
 	}
 }
