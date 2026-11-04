@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Database guard.** Scenarios that truncate tables or run setup SQL are
+  refused when the database does not look disposable: not local, not a
+  single-label service host, and no test marker in its name. To allow one
+  database explicitly, set `STILLRIGHT_ALLOW_DATABASE=host/database`.
+- **Claude Code skill** in `skills/stillright`. It teaches Claude to write
+  scenarios for an app, run them, read `report.json` and fix what breaks.
+
 ## v0.1.0
 
 The first release. Stillright checks that an application's business rules,

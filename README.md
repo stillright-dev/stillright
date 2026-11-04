@@ -80,6 +80,25 @@ go build -o stillright ./cmd/stillright
 You also need PostgreSQL. Use a **disposable** database: Stillright
 truncates the tables you list before every run.
 
+**Database guard.** Some scenarios write to the database: they truncate
+tables or run seed SQL. Stillright runs those only against databases that
+look disposable:
+
+- a local database (`localhost`, loopback, Unix socket);
+- a single-label host, such as a Docker or CI service named `postgres`;
+- a database whose name carries a test marker (`app_test`, `e2e`, `ci`,
+  `sandbox`…).
+
+Anything else is refused before connecting. To allow one specific database,
+name it with its host:
+
+```sh
+STILLRIGHT_ALLOW_DATABASE=db.abcd.supabase.co/postgres stillright run ...
+```
+
+Naming the database alone is not enough, since many hosted databases share
+a name (every Supabase database is `postgres`).
+
 ## Quickstart
 
 [`examples/assinaturas`](examples/assinaturas) is a small Node webhook
@@ -240,6 +259,27 @@ that it passes, and tells you the rate it observed.
     scenarios: stillright
 ```
 
+## Using it with Claude Code
+
+[`skills/stillright`](skills/stillright/SKILL.md) is a Claude Code skill. It
+teaches Claude to:
+
+- read your webhook handlers and schema, then propose invariants;
+- write the scenarios and fixtures;
+- run them and read `report.json`;
+- fix what breaks and confirm the fix with `--sequence`.
+
+It respects the database guard and never allows a database on its own.
+Install it for your user:
+
+```sh
+mkdir -p ~/.claude/skills/stillright
+cp skills/stillright/SKILL.md ~/.claude/skills/stillright/
+```
+
+Then ask, for example: *"make sure the payment webhook is safe under
+duplicate and out-of-order deliveries"*.
+
 ## Limitations of v0.1
 
 Stillright v0.1 is useful, but it does not do everything:
@@ -258,7 +298,9 @@ Stillright v0.1 is useful, but it does not do everything:
   help, but nothing guarantees it.
 - **Shrinking is greedy and bounded** (60 candidates per failure). The result
   is small and confirmed to fail, but not always the absolute minimum.
-- **`reset: truncate` really truncates** (`RESTART IDENTITY CASCADE`). Never
+- **`reset: truncate` really truncates** (`RESTART IDENTITY CASCADE`). The
+  database guard catches the obvious mistakes, but it is a heuristic: a
+  local database or one named `*_test` is assumed to be disposable. Never
   point a scenario at a database you care about.
 - **Effects:**
   - no HTTPS interception (HTTPS calls are recorded by host only);
