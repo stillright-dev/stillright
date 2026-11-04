@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 120 120'%3E%3Cstyle%3Epath%7Bstroke:%230A0A0A%7D@media (prefers-color-scheme: dark)%7Bpath%7Bstroke:%23FFFFFF%7D%7D%3C/style%3E%3Cg fill='none' stroke-width='20' stroke-linecap='round'%3E%3Cpath d='M60 60 A20 20 0 1 1 78.79 46.84'/%3E%3Cpath d='M60 60 A20 20 0 1 1 41.21 73.16'/%3E%3C/g%3E%3C/svg%3E">
+<title>stillright · {{if .Scenario.Name}}{{.Scenario.Name}}{{else}}{{.Scenario.Path}}{{end}} · {{.Status}}</title>
+<style>
+:root {
+  --bg: #ffffff; --surface: #ffffff; --text: #0a0a0a; --muted: #6b6b6b; --border: #e5e5e5;
+  --code-bg: #f5f5f5;
+  --pass: #15803d; --pass-bg: #ecfdf3;
+  --fail: #b91c1c; --fail-bg: #fef2f2;
+  --error: #a16207; --error-bg: #fefce8;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a0a0a; --surface: #141414; --text: #ffffff; --muted: #a3a3a3; --border: #262626;
+    --code-bg: #1f1f1f;
+    --pass: #4ade80; --pass-bg: #0f2417;
+    --fail: #f87171; --fail-bg: #2a1212;
+    --error: #facc15; --error-bg: #26210a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.5 "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+main { max-width: 960px; margin: 0 auto; padding: 24px 16px 48px; }
+h1 { font-size: 22px; margin: 8px 0 4px; overflow-wrap: anywhere; }
+h2 { font-size: 16px; margin: 32px 0 12px; }
+h3 { font-size: 15px; margin: 0; overflow-wrap: anywhere; }
+code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+.muted { color: var(--muted); }
+.meta { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--muted); font-size: 13px; }
+.meta code { color: var(--text); }
+.pill {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; letter-spacing: .02em;
+}
+.pill.pass { color: var(--pass); background: var(--pass-bg); }
+.pill.fail { color: var(--fail); background: var(--fail-bg); }
+.pill.error { color: var(--error); background: var(--error-bg); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin: 0 0 12px; }
+.card.fail { border-left: 4px solid var(--fail); }
+.card.error { border-left: 4px solid var(--error); }
+.card-head { display: flex; gap: 10px; align-items: baseline; }
+.card-head .kind { margin-left: auto; color: var(--muted); font-size: 12px; }
+.card p { margin: 8px 0; }
+.notice { border-radius: 10px; padding: 10px 14px; margin: 12px 0; }
+.notice.warn { background: var(--error-bg); color: var(--text); border: 1px solid var(--border); }
+.notice.err { background: var(--fail-bg); color: var(--text); border: 1px solid var(--border); }
+.seq { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 6px 0; }
+.batch { display: inline-flex; flex-wrap: wrap; gap: 4px; padding: 3px; border: 1px dashed var(--border); border-radius: 8px; }
+.send { background: var(--code-bg); border-radius: 6px; padding: 1px 7px; }
+.send small { color: var(--muted); }
+.arrow { color: var(--muted); }
+.scroll { overflow-x: auto; margin: 8px 0; }
+table { border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 4px 24px 4px 0; border-bottom: 1px solid var(--border); white-space: nowrap; vertical-align: top; }
+td.wrap { white-space: normal; overflow-wrap: anywhere; min-width: 6em; max-width: 36em; }
+th { color: var(--muted); font-weight: 600; }
+.null { color: var(--muted); font-style: italic; }
+pre { background: var(--code-bg); border-radius: 8px; padding: 10px 12px; overflow-x: auto; margin: 8px 0; }
+footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+.brand { display: flex; align-items: center; gap: 8px; margin-bottom: 20px; font-weight: 700; font-size: 17px; letter-spacing: -.01em; }
+.brand svg { width: 22px; height: 22px; }
+.tagline { color: var(--muted); font-weight: 400; font-size: 13px; margin-left: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">
+    <svg viewBox="0 0 120 120" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="13" stroke-linecap="round"><path d="M60 60 A20 20 0 1 1 78.79 46.84"/><path d="M60 60 A20 20 0 1 1 41.21 73.16"/></g></svg>
+    Stillright <span class="tagline">Still right when things go wrong.</span>
+  </div>
+  <span class="pill {{lower .Status}}">{{.Status}}</span>
+  <h1>{{if .Scenario.Name}}{{.Scenario.Name}}{{else}}{{.Scenario.Path}}{{end}}</h1>
+  <div class="meta">
+    <span><code>{{.Scenario.Path}}</code></span>
+    <span>seed <code>{{.Seed}}</code></span>
+    <span>{{.Runs.Executed}} of {{.Runs.Planned}} runs: {{.Runs.Passed}} passed, {{.Runs.Failed}} failed, {{.Runs.Errored}} could not be verified</span>
+    {{if ne .Mode "explore"}}<span>mode <code>{{.Mode}}</code></span>{{end}}
+    {{if .Interrupted}}<span>interrupted</span>{{end}}
+  </div>
+
+  {{if .Error}}<div class="notice err"><strong>Could not run:</strong> {{.Error}}</div>{{end}}
+  {{range .Warnings}}<div class="notice warn"><strong>Warning:</strong> {{.}}</div>{{end}}
+
+  <h2>Checks</h2>
+  {{range .Checks}}
+  <section class="card {{lower .Status}}">
+    <div class="card-head">
+      <span class="pill {{lower .Status}}">{{.Status}}</span>
+      <h3>{{.Name}}</h3>
+      <span class="kind">{{.Kind}}</span>
+    </div>
+    {{if .FirstFailure}}
+      <p class="muted">Failed in {{.FailedRuns}} of {{$.Runs.Executed}} runs.{{if .FirstFailure.Sequence.Index}} First in sequence {{.FirstFailure.Sequence.Index}}:{{else}} First in the given sequence:{{end}}</p>
+      {{template "seq" .FirstFailure.Sequence}}
+      {{with .Shrunk}}
+        {{if .Sequence}}
+          <p><strong>Smallest sequence</strong> <span class="muted">(reproduced {{.Reproduced}}/{{.Attempts}}{{if .BudgetExhausted}}; stopped after {{.CandidatesTried}} candidates, may not be minimal{{end}})</span></p>
+          {{template "seq" .Sequence}}
+        {{else}}
+          <p class="muted">Could not reproduce it in {{.Attempts}} attempts (timing-dependent); not shrunk.</p>
+        {{end}}
+      {{end}}
+      {{$ev := .FirstFailure.Evidence}}{{$detail := .FirstFailure.Detail}}
+      {{with .Shrunk}}{{if .Evidence}}{{$ev = .Evidence}}{{$detail = .Detail}}{{end}}{{end}}
+      {{if $detail}}<p>{{$detail}}</p>{{end}}
+      {{if $ev.Total}}
+        <p class="muted">Evidence: {{plural $ev.Total "row" "rows"}}{{if lt (len $ev.Rows) $ev.Total}}, showing the first {{len $ev.Rows}}{{end}}</p>
+        <div class="scroll"><table>
+          <tr>{{range $ev.Columns}}<th>{{.}}</th>{{end}}</tr>
+          {{range $ev.Rows}}<tr>{{range .}}<td class="mono wrap{{if isNull .}} null{{end}}">{{cell .}}</td>{{end}}</tr>{{end}}
+        </table></div>
+      {{end}}
+      <p class="muted">Reproduce:</p>
+      <pre>{{range $i, $c := .Reproduce}}{{if $i}}
+{{end}}{{$c}}{{end}}</pre>
+    {{else if .Error}}
+      <p class="muted">{{.Error}}</p>
+    {{end}}
+  </section>
+  {{end}}
+
+  {{with .StoppedAt}}
+  <h2>Run that stopped the exploration</h2>
+  <section class="card">
+    {{template "seq" .Sequence}}
+    {{if .Error}}<p><strong>Could not be verified:</strong> {{.Error}}</p>{{end}}
+    <div class="scroll"><table>
+      <tr><th>batch</th><th>event</th><th>request</th><th>status</th><th>time</th><th>delay</th></tr>
+      {{range $i, $d := .Deliveries}}
+      <tr>
+        <td>{{if firstOfBatch $.StoppedAt.Deliveries $i}}{{add $d.Batch 1}}{{end}}</td>
+        <td class="mono">{{$d.Event}}</td>
+        <td class="mono">{{$d.Method}} {{$d.Path}}</td>
+        <td>{{if $d.Status}}{{$d.Status}}{{else}}<span class="null">no response</span>{{end}}</td>
+        <td>{{printf "%.1f" $d.DurationMS}} ms</td>
+        <td>{{if $d.DelayMS}}{{$d.DelayMS}} ms{{end}}</td>
+      </tr>
+      {{end}}
+    </table></div>
+  </section>
+  {{end}}
+
+  {{with .Proxy}}
+  <h2>Effects proxy</h2>
+  <p class="muted">Listened on <code>{{.Listen}}</code> and recorded {{plural .Calls "call" "calls"}}{{if .Hosts}} to {{range $i, $h := .Hosts}}{{if $i}}, {{end}}<code>{{$h}}</code>{{end}}{{end}}.</p>
+  {{end}}
+
+  <footer>Generated by stillright {{.Version}} on {{.GeneratedAt.Format "2006-01-02 15:04:05 UTC"}} · {{.Schema}}</footer>
+</main>
+</body>
+</html>
+{{define "seq"}}<div class="seq">{{range $i, $b := .Batches}}{{if $i}}<span class="arrow">→</span>{{end}}<span class="batch">{{range $j, $s := $b}}{{if $j}}<span class="arrow">‖</span>{{end}}<span class="send mono">{{$s.Event}}{{if $s.DelayMS}} <small>+{{$s.DelayMS}}ms</small>{{end}}</span>{{end}}</span>{{end}}</div>{{end}}

@@ -67,6 +67,9 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	sequence := fs.String("sequence", "", "run only this sequence, as printed in reports, e.g. '[paid | paid] -> [refunded]'")
 	attempts := fs.Int("attempts", 5, "times to retry a sequence before concluding it passes (replay and shrinking)")
 	noShrink := fs.Bool("no-shrink", false, "report failures as found, without reducing them")
+	reportJSON := fs.String("report-json", "", "write a machine-readable report to `file` (see docs/report-schema.md)")
+	reportHTML := fs.String("report-html", "", "write a self-contained HTML report to `file`")
+	summary := fs.String("summary", "", "append a Markdown summary to `file`, e.g. $GITHUB_STEP_SUMMARY")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, "Usage: stillright run [flags] <scenario.yaml>\n\nFlags:\n")
 		fs.PrintDefaults()
@@ -110,9 +113,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	outputs := reportOutputs{json: *reportJSON, html: *reportHTML, summary: *summary}
+
 	sc, err := scenario.Load(paths[0])
 	if err != nil {
 		fmt.Fprintf(stderr, "invalid scenario:\n%v\n", err)
+		outputs.write(report.LoadError(paths[0], version, time.Now(), err), stderr)
 		return 2
 	}
 
@@ -157,7 +163,37 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, "\r\033[K")
 	}
 	report.Terminal(stdout, ex)
+	if !outputs.write(report.Build(ex, version, time.Now()), stderr) {
+		return 2
+	}
 	return ex.ExitCode()
+}
+
+type reportOutputs struct{ json, html, summary string }
+
+// write saves every requested report and says whether all were written.
+func (o reportOutputs) write(rep *report.Report, stderr io.Writer) bool {
+	ok := true
+	save := func(path string, flags int, render func(io.Writer, *report.Report) error) {
+		if path == "" {
+			return
+		}
+		f, err := os.OpenFile(path, flags, 0o644)
+		if err == nil {
+			err = render(f, rep)
+			if cerr := f.Close(); err == nil {
+				err = cerr
+			}
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "stillright: cannot write %s: %v\n", path, err)
+			ok = false
+		}
+	}
+	save(o.json, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, report.JSON)
+	save(o.html, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, report.HTML)
+	save(o.summary, os.O_WRONLY|os.O_CREATE|os.O_APPEND, report.Markdown)
+	return ok
 }
 
 // randomSeed is short enough to type back on a command line.

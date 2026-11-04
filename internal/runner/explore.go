@@ -74,6 +74,9 @@ type Exploration struct {
 	Error string
 	// Only is the single sequence that was run, when not generating.
 	Only *perturb.Sequence
+	// Attempts is how many times a sequence was retried when replaying and
+	// shrinking.
+	Attempts int
 	// ProxyAddr is where the effects proxy listened, and ProxyCalls how many
 	// outbound calls it recorded in total; zero calls usually means the app
 	// is not routed through it.
@@ -255,7 +258,7 @@ func (r *Runner) shrink(ctx context.Context, sc *scenario.Scenario, inv int, seq
 }
 
 func newExploration(sc *scenario.Scenario, opts Options) *Exploration {
-	ex := &Exploration{Scenario: sc, Seed: opts.Seed, Planned: PlannedRuns(sc, opts.Runs), Only: opts.Only}
+	ex := &Exploration{Scenario: sc, Seed: opts.Seed, Planned: PlannedRuns(sc, opts.Runs), Only: opts.Only, Attempts: opts.attempts()}
 	if opts.Only != nil {
 		ex.Planned = opts.attempts()
 	}

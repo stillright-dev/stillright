@@ -265,7 +265,7 @@ func TestTerminalWarnsAboutUnseenHost(t *testing.T) {
 	}
 	var b strings.Builder
 	Terminal(&b, ex)
-	if !strings.Contains(b.String(), "warning: \"one email\" filters on host \"api.email.local\", which the proxy never saw\n         (it saw: 127.0.0.1)") {
+	if !strings.Contains(b.String(), "warning: \"one email\" filters on host \"api.email.local\", which the proxy never\n         saw (it saw: 127.0.0.1); see docs/effects.md.") {
 		t.Errorf("got:\n%s", b.String())
 	}
 	ex.ProxyHosts = []string{"api.email.local"}
@@ -274,4 +274,8 @@ func TestTerminalWarnsAboutUnseenHost(t *testing.T) {
 	if strings.Contains(b.String(), "warning") {
 		t.Errorf("unexpected warning:\n%s", b.String())
 	}
+}
+
+func invariantRows(cols []string, row []*string) invariant.Rows {
+	return invariant.Rows{Columns: cols, Values: [][]*string{row}, Total: 1}
 }

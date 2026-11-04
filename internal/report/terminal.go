@@ -33,7 +33,7 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	case ex.Only != nil:
 		fmt.Fprintf(w, "runs      given sequence %s, up to %d attempts\n", perturb.Format(sc, *ex.Only), ex.Planned)
 	case perturb.Enabled(sc.Perturb):
-		fmt.Fprintf(w, "runs      %d sequences (sequence 0 is the declared order)\n", ex.Planned)
+		fmt.Fprintf(w, "runs      %s (sequence 0 is the declared order)\n", plural(ex.Planned, "sequence", "sequences"))
 	default:
 		fmt.Fprintf(w, "runs      %d (declared order only)\n", ex.Planned)
 	}
@@ -70,8 +70,8 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 
 	var pass, fail, errs int
 	for _, st := range ex.Invariants {
-		switch {
-		case st.Failed > 0:
+		switch checkStatus(st) {
+		case invariant.Fail:
 			fail++
 			fmt.Fprintf(w, "FAIL   %s\n", st.Name)
 			if ex.Executed > 1 || st.FirstSequence.Index != 0 {
@@ -81,7 +81,7 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 				fmt.Fprintf(w, "       could not be checked in %d runs: %s\n", st.Errored, st.FirstError)
 			}
 			writeFailure(w, ex, st)
-		case st.Errored > 0:
+		case invariant.Error:
 			errs++
 			fmt.Fprintf(w, "ERROR  %s\n", st.Name)
 			// A sequence-level error is already printed with the sequence.
@@ -94,7 +94,9 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 		}
 	}
 
-	writeProxyWarnings(w, ex)
+	for _, msg := range warnings(ex) {
+		fmt.Fprintf(w, "\nwarning: %s\n", wrap(msg, 80, "         "))
+	}
 	fmt.Fprintf(w, "\n%d passed, %d failed, %d errors\n", pass, fail, errs)
 	fmt.Fprintf(w, "%d of %d runs: %d passed, %d failed, %d could not be verified\n",
 		ex.Executed, ex.Planned, ex.Executed-ex.Failed-ex.Errored, ex.Failed, ex.Errored)
@@ -103,37 +105,6 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 		fmt.Fprintf(w, "interrupted before everything ran\n")
 	case ex.Executed < ex.Planned:
 		fmt.Fprintf(w, "stopped at the first run that did not pass; use --keep-going to run them all\n")
-	}
-}
-
-// writeProxyWarnings flags effect results that are probably vacuous: an
-// assertion like count(host == "x") <= 1 passes trivially when the app's
-// calls never reach the proxy.
-func writeProxyWarnings(w io.Writer, ex *runner.Exploration) {
-	sc := ex.Scenario
-	if !sc.UsesProxy() || ex.Executed == 0 {
-		return
-	}
-	if ex.ProxyCalls == 0 {
-		fmt.Fprintf(w, "\nwarning: the effects proxy recorded no outbound calls in any run. If the app should\n"+
-			"         make calls here, it is not using the proxy and effect results mean nothing;\n"+
-			"         see docs/effects.md.\n")
-		return
-	}
-	seen := map[string]bool{}
-	for _, h := range ex.ProxyHosts {
-		seen[h] = true
-	}
-	for _, ef := range sc.Effects {
-		if ef.Assertion == nil {
-			continue
-		}
-		for _, h := range ef.Assertion.Hosts() {
-			if !seen[h] {
-				fmt.Fprintf(w, "\nwarning: %q filters on host %q, which the proxy never saw\n"+
-					"         (it saw: %s); see docs/effects.md.\n", ef.Name, h, strings.Join(ex.ProxyHosts, ", "))
-			}
-		}
 	}
 }
 
@@ -148,29 +119,15 @@ func seqLabel(sc *scenario.Scenario, seq perturb.Sequence) string {
 // reproduce a failed invariant.
 func writeFailure(w io.Writer, ex *runner.Exploration, st runner.InvariantStats) {
 	sc := ex.Scenario
-	evidence, detail := st.FirstFailure.Evidence, st.FirstFailure.Detail
-	smallest := st.FirstSequence
-
 	if sh := st.Shrunk; sh != nil {
-		switch {
-		case sh.Tried == 0:
+		if sh.Tried == 0 {
 			fmt.Fprintf(w, "       could not reproduce it in %d attempts (timing-dependent); not shrunk\n", sh.Attempts)
-		default:
-			smallest = sh.Sequence
-			note := fmt.Sprintf("reproduced %d/%d", sh.Reproduced, sh.Attempts)
-			if sh.Reproduced == 0 {
-				note += ", timing-dependent: try --attempts 20"
-			}
-			if sh.Exceeded {
-				note += fmt.Sprintf("; stopped after %d candidates, may not be minimal", sh.Tried)
-			}
-			fmt.Fprintf(w, "       smallest sequence: %s   (%s; %s)\n", perturb.Format(sc, smallest), describeSequence(smallest), note)
-			if sh.Reproduced > 0 {
-				evidence, detail = sh.Evidence, sh.Detail
-			}
+		} else {
+			fmt.Fprintf(w, "       smallest sequence: %s   (%s; %s)\n", perturb.Format(sc, sh.Sequence), describeSequence(sh.Sequence), shrinkNote(sh))
 		}
 	}
 
+	evidence, detail := failureDetail(st)
 	if detail != "" {
 		fmt.Fprintf(w, "       %s\n", detail)
 	}
@@ -186,18 +143,44 @@ func writeFailure(w io.Writer, ex *runner.Exploration, st runner.InvariantStats)
 		writeEvidence(w, evidence)
 	}
 
-	var cmds []string
-	if st.FirstSequence.Index >= 0 {
-		cmds = append(cmds, fmt.Sprintf("stillright run %s --seed %d --replay %d", shellQuote(sc.Path), ex.Seed, st.FirstSequence.Index))
-	}
-	cmds = append(cmds, fmt.Sprintf("stillright run %s --sequence '%s'", shellQuote(sc.Path), perturb.Format(sc, smallest)))
-	for i, c := range cmds {
+	for i, c := range reproduceCommands(ex, st) {
 		label := "reproduce:"
 		if i > 0 {
 			label = strings.Repeat(" ", len(label))
 		}
 		fmt.Fprintf(w, "       %s %s\n", label, c)
 	}
+}
+
+// shrinkNote summarizes how trustworthy a shrunk sequence is.
+func shrinkNote(sh *runner.Shrunk) string {
+	note := fmt.Sprintf("reproduced %d/%d", sh.Reproduced, sh.Attempts)
+	if sh.Reproduced == 0 {
+		note += ", timing-dependent: try --attempts 20"
+	}
+	if sh.Exceeded {
+		note += fmt.Sprintf("; stopped after %d candidates, may not be minimal", sh.Tried)
+	}
+	return note
+}
+
+// wrap breaks s into lines of at most width runes, indenting continuation
+// lines with indent.
+func wrap(s string, width int, indent string) string {
+	var lines []string
+	line := ""
+	for _, word := range strings.Fields(s) {
+		if line != "" && utf8.RuneCountInString(line)+1+utf8.RuneCountInString(word) > width-utf8.RuneCountInString(indent) {
+			lines = append(lines, line)
+			line = word
+			continue
+		}
+		if line != "" {
+			line += " "
+		}
+		line += word
+	}
+	return strings.Join(append(lines, line), "\n"+indent)
 }
 
 // describeSequence summarizes a sequence's shape in words.
@@ -213,13 +196,6 @@ func describeSequence(seq perturb.Sequence) string {
 	default:
 		return fmt.Sprintf("%d deliveries in %d batches", n, batches)
 	}
-}
-
-func shellQuote(s string) string {
-	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-./") == "" {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func describePerturb(p scenario.Perturb) string {
