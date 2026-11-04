@@ -116,7 +116,7 @@ Add MongoDB as a service container next to your app:
 ```yaml
 services:
   mongo:
-    image: mongo:8
+    image: mongo:7    # mongo:8 currently exits on GitHub's ubuntu-latest runners
     ports: ["27017:27017"]
 env:
   MONGODB_URI: mongodb://localhost:27017/assinaturas_test
