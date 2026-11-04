@@ -40,6 +40,33 @@ func (a *Assertion) Matching(calls []Call) []Call {
 	return out
 }
 
+// Hosts lists the hosts the predicate compares with ==, so a report can warn
+// when the proxy never saw them (a sign the app is not routed through it).
+func (a *Assertion) Hosts() []string {
+	var hosts []string
+	var walk func(node)
+	walk = func(n node) {
+		switch n := n.(type) {
+		case orNode:
+			walk(n.l)
+			walk(n.r)
+		case andNode:
+			walk(n.l)
+			walk(n.r)
+		case notNode:
+			walk(n.n)
+		case cmpNode:
+			if n.field == "host" && n.op == "==" {
+				hosts = append(hosts, strings.ToLower(n.value))
+			}
+		}
+	}
+	if a.pred != nil {
+		walk(a.pred)
+	}
+	return hosts
+}
+
 // Holds reports whether n matching calls satisfy the comparison.
 func (a *Assertion) Holds(n int) bool {
 	switch a.cmp {

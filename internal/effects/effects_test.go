@@ -1,8 +1,10 @@
 package effects
 
 import (
+	"bufio"
 	"bytes"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -103,8 +105,8 @@ func TestProxyRecordsAndStubs(t *testing.T) {
 		t.Errorf("default response = %d %s", resp.StatusCode, body)
 	}
 
-	// Direct calls to the proxy are recorded too.
-	resp, err = http.Post("http://"+p.Addr()+"/direct", "text/plain", strings.NewReader("hi"))
+	// Direct calls name the host in the first path segment.
+	resp, err = http.Post("http://"+p.Addr()+"/API.Email.local/send?y=2", "text/plain", strings.NewReader("hi"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,10 +122,13 @@ func TestProxyRecordsAndStubs(t *testing.T) {
 	if c := got[1]; c.Host != "example.invalid" || c.Path != "/anything" {
 		t.Errorf("call 1 = %+v", c)
 	}
-	if c := got[2]; c.Host != "127.0.0.1" || c.Path != "/direct" || string(c.Body) != "hi" {
+	if c := got[2]; c.Host != "api.email.local" || c.Path != "/send" || c.Query != "y=2" || string(c.Body) != "hi" {
 		t.Errorf("call 2 = %+v", c)
 	}
 
+	if h := strings.Join(p.Hosts(), ","); h != "api.email.local,example.invalid" {
+		t.Errorf("hosts = %s", h)
+	}
 	p.Reset()
 	if len(p.Calls()) != 0 || p.Total() != 3 {
 		t.Errorf("after reset: %d calls, total %d", len(p.Calls()), p.Total())
@@ -154,5 +159,43 @@ func TestProxyTruncatesBody(t *testing.T) {
 	c := p.Calls()[0]
 	if len(c.Body) != MaxBodyBytes || !c.Truncated {
 		t.Errorf("body %d bytes, truncated=%v", len(c.Body), c.Truncated)
+	}
+}
+
+// Node's fetch tunnels even plain http:// requests through CONNECT.
+func TestProxyServesPlainHTTPInsideTunnel(t *testing.T) {
+	p := startProxy(t, Stub{Host: "api.email.local", Status: 202, Body: `{"ok":1}`})
+	conn, err := net.Dial("tcp", p.Addr())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	io.WriteString(conn, "CONNECT api.email.local:80 HTTP/1.1\r\nHost: api.email.local:80\r\n\r\n")
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("CONNECT: %v %v", resp, err)
+	}
+	for i := 0; i < 2; i++ { // keep-alive: two requests on one tunnel
+		io.WriteString(conn, "POST /send HTTP/1.1\r\nHost: api.email.local\r\nContent-Length: 5\r\n\r\nhello")
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode != 202 || string(body) != `{"ok":1}` {
+			t.Errorf("tunneled response = %d %s", resp.StatusCode, body)
+		}
+	}
+	got := p.Calls()
+	if len(got) != 2 || got[0].Host != "api.email.local" || got[0].Path != "/send" || string(got[0].Body) != "hello" {
+		t.Errorf("calls = %+v", got)
+	}
+}
+
+func TestAssertionHosts(t *testing.T) {
+	a, _ := ParseAssertion(`count((host == "A.local" && path == "/x") || !(host == "b.local") || host != "c.local") >= 1`)
+	if got := strings.Join(a.Hosts(), ","); got != "a.local,b.local" {
+		t.Errorf("hosts = %s", got)
 	}
 }

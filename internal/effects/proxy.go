@@ -2,8 +2,11 @@ package effects
 
 import (
 	"io"
+	"maps"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -20,10 +23,15 @@ type Stub struct {
 // Proxy is a recording HTTP proxy. It never forwards anything: every request
 // is recorded and answered from its stubs (200 "{}" by default).
 //
-// It accepts both proxy-style requests (the application sets HTTP_PROXY) and
-// direct ones (the application's provider URL points at the proxy). HTTPS
-// tunnels (CONNECT) are recorded by host and refused, since there is no TLS
-// interception.
+// It accepts three ways in:
+//   - proxy-style requests, from an app with HTTP_PROXY set;
+//   - CONNECT tunnels carrying plain HTTP, which some clients (Node's fetch)
+//     use even for http:// URLs; TLS tunnels are recorded by host and closed,
+//     since there is no TLS interception;
+//   - direct requests, from an app whose provider URL points at the proxy
+//     with the provider's host as the first path segment:
+//     http://127.0.0.1:8899/api.email.local/send is recorded as host
+//     api.email.local, path /send.
 type Proxy struct {
 	ln    net.Listener
 	srv   *http.Server
@@ -31,7 +39,8 @@ type Proxy struct {
 
 	mu    sync.Mutex
 	calls []Call
-	total int // calls recorded since the proxy started, across resets
+	total int             // calls recorded since the proxy started, across resets
+	hosts map[string]bool // every host seen since the proxy started
 }
 
 // Listen starts a proxy on addr, such as "127.0.0.1:8899".
@@ -40,7 +49,7 @@ func Listen(addr string, stubs []Stub) (*Proxy, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &Proxy{ln: ln, stubs: map[string]Stub{}}
+	p := &Proxy{ln: ln, stubs: map[string]Stub{}, hosts: map[string]bool{}}
 	for _, s := range stubs {
 		p.stubs[strings.ToLower(s.Host)] = s
 	}
@@ -73,30 +82,83 @@ func (p *Proxy) Total() int {
 	return p.total
 }
 
+// Hosts lists every host seen since the proxy started, sorted.
+func (p *Proxy) Hosts() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Sorted(maps.Keys(p.hosts))
+}
+
 func (p *Proxy) record(c Call) {
 	p.mu.Lock()
 	p.calls = append(p.calls, c)
 	p.total++
+	p.hosts[c.Host] = true
 	p.mu.Unlock()
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	call := Call{Method: r.Method, At: time.Now()}
-
 	if r.Method == http.MethodConnect {
-		call.Host = hostname(r.Host)
-		p.record(call)
-		http.Error(w, "stillright: HTTPS is recorded by host but not intercepted; point the app at an http:// URL for this provider", http.StatusBadGateway)
+		p.tunnel(w, r)
 		return
 	}
+	p.serve(w, r, "")
+}
 
-	host := r.URL.Host // proxy-style: absolute URL in the request line
-	if host == "" {
-		host = r.Host // direct: the app called the proxy itself
+// tunnel accepts a CONNECT. Plain HTTP inside the tunnel is served like any
+// other request; a TLS handshake is recorded by host and the tunnel closed.
+func (p *Proxy) tunnel(w http.ResponseWriter, r *http.Request) {
+	host := hostname(r.Host)
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		http.Error(w, "stillright: cannot open tunnel", http.StatusInternalServerError)
+		return
 	}
-	call.Host = hostname(host)
-	call.Path = r.URL.Path
-	call.Query = r.URL.RawQuery
+	conn, buf, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return
+	}
+	conn.SetDeadline(time.Now().Add(30 * time.Second))
+	first, err := buf.Reader.Peek(1)
+	if err != nil {
+		return
+	}
+	if first[0] == 0x16 { // TLS handshake record
+		p.record(Call{Method: http.MethodConnect, Host: host, At: time.Now()})
+		return
+	}
+	for {
+		req, err := http.ReadRequest(buf.Reader)
+		if err != nil {
+			return
+		}
+		rec := httptest.NewRecorder()
+		p.serve(rec, req, host)
+		resp := rec.Result()
+		resp.ContentLength = int64(rec.Body.Len())
+		if err := resp.Write(conn); err != nil || req.Close {
+			return
+		}
+	}
+}
+
+// serve records one HTTP request and answers it from the stubs. tunnelHost
+// is the CONNECT target when the request came through a tunnel.
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, tunnelHost string) {
+	call := Call{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, At: time.Now()}
+	switch {
+	case r.URL.Host != "": // proxy-style: absolute URL in the request line
+		call.Host = hostname(r.URL.Host)
+	case tunnelHost != "":
+		call.Host = tunnelHost
+	default: // direct: /<host>/<path>
+		seg, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+		call.Host, call.Path = hostname(seg), "/"+rest
+	}
 	body, _ := io.ReadAll(io.LimitReader(r.Body, MaxBodyBytes+1))
 	if len(body) > MaxBodyBytes {
 		body, call.Truncated = body[:MaxBodyBytes], true
