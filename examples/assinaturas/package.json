@@ -1,0 +1,17 @@
+{
+  "name": "stillright-example-assinaturas",
+  "private": true,
+  "description": "A small subscription webhook with real, common bugs, for the stillright demo.",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "db:setup": "node db/setup.js db/schema.sql",
+    "db:setup:fixed": "node db/setup.js fixed/schema.sql",
+    "start": "node server.js",
+    "start:fixed": "node fixed/server.js"
+  },
+  "dependencies": {
+    "express": "^5.3.0",
+    "pg": "^8.23.1"
+  }
+}

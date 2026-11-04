@@ -1,0 +1,40 @@
+# The gateway delivers "payment confirmed" more than once, sometimes at the
+# same time. The customer must still end up with one subscription and one
+# payment record.
+version: 1
+name: assinatura-duplicada
+target:
+  base_url: http://localhost:3000
+  database_url: ${DATABASE_URL}
+setup:
+  sql: fixtures/seed.sql
+  reset: truncate
+  reset_tables: [clientes, assinaturas, pagamentos, eventos_recebidos, emails_enviados]
+events:
+  - id: pago
+    request:
+      method: POST
+      path: /webhooks/pagamento
+      body_file: fixtures/pagamento_confirmado.json
+perturb:
+  duplicate: 3
+  concurrency: 3
+  delay_ms: [0, 20]
+runs: 50
+# The app sends a welcome e-mail; stub the provider so runs never depend on
+# (or spam) a real one. Run the app with
+# EMAIL_API_URL=http://127.0.0.1:8899/api.email.local
+proxy:
+  listen: 127.0.0.1:8899
+  stubs:
+    - host: api.email.local
+      status: 202
+invariants:
+  - name: uma assinatura ativa por cliente
+    sql: |
+      SELECT cliente_id, count(*) AS ativas FROM assinaturas
+      WHERE status = 'ativa' GROUP BY 1 HAVING count(*) > 1
+  - name: um registro por pagamento do gateway
+    sql: |
+      SELECT gateway_id, count(*) AS registros FROM pagamentos
+      GROUP BY 1 HAVING count(*) > 1

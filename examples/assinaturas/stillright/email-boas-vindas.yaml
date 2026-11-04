@@ -1,0 +1,33 @@
+# The welcome e-mail goes out exactly once, however many times the payment is
+# delivered. Run the app with EMAIL_API_URL=http://127.0.0.1:8899/api.email.local
+# so its e-mails reach the stillright proxy instead of a real provider.
+version: 1
+name: email-boas-vindas
+target:
+  base_url: http://localhost:3000
+  database_url: ${DATABASE_URL}
+setup:
+  sql: fixtures/seed.sql
+  reset: truncate
+  reset_tables: [clientes, assinaturas, pagamentos, eventos_recebidos, emails_enviados]
+events:
+  - id: pago
+    request:
+      method: POST
+      path: /webhooks/pagamento
+      body_file: fixtures/pagamento_confirmado.json
+perturb:
+  duplicate: 3
+  concurrency: 3
+  delay_ms: [0, 20]
+runs: 50
+settle_ms: 50
+proxy:
+  listen: 127.0.0.1:8899
+  stubs:
+    - host: api.email.local
+      status: 202
+      body: '{"queued": true}'
+effects:
+  - name: exatamente um e-mail de boas-vindas
+    assert: count(host == "api.email.local" && path == "/send" && body contains "boas-vindas") == 1

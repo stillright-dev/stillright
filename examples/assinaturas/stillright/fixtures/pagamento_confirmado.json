@@ -1,0 +1,1 @@
+{"id": "evt_pago_1", "tipo": "pagamento.confirmado", "pagamento_id": "pay_123", "cliente_id": 42, "valor": 4990}

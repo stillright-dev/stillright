@@ -1,0 +1,50 @@
+# Gateways do not promise order: a refund can arrive before, or together with,
+# the payment it refunds. Money that was returned must never leave an active
+# subscription behind.
+version: 1
+name: estorno-fora-de-ordem
+target:
+  base_url: http://localhost:3000
+  database_url: ${DATABASE_URL}
+setup:
+  sql: fixtures/seed.sql
+  reset: truncate
+  reset_tables: [clientes, assinaturas, pagamentos, eventos_recebidos, emails_enviados]
+events:
+  - id: pago
+    request:
+      method: POST
+      path: /webhooks/pagamento
+      body_file: fixtures/pagamento_confirmado.json
+  - id: estornado
+    request:
+      method: POST
+      path: /webhooks/pagamento
+      body_file: fixtures/pagamento_estornado.json
+    after: pago
+perturb:
+  duplicate: 2
+  concurrency: 2
+  reorder: true
+  delay_ms: [0, 30]
+runs: 100
+# The app sends a welcome e-mail; stub the provider so runs never depend on
+# (or spam) a real one. Run the app with
+# EMAIL_API_URL=http://127.0.0.1:8899/api.email.local
+proxy:
+  listen: 127.0.0.1:8899
+  stubs:
+    - host: api.email.local
+      status: 202
+invariants:
+  - name: pagamento estornado não deixa assinatura ativa
+    sql: |
+      SELECT a.id AS assinatura_id, a.cliente_id FROM assinaturas a
+      JOIN pagamentos p ON p.assinatura_id = a.id
+      JOIN eventos_recebidos e ON e.pagamento_id = p.gateway_id AND e.tipo = 'pagamento.estornado'
+      WHERE a.status = 'ativa'
+  - name: pagamento com estorno recebido fica estornado
+    sql: |
+      SELECT DISTINCT p.gateway_id, p.status FROM pagamentos p
+      JOIN eventos_recebidos e ON e.pagamento_id = p.gateway_id AND e.tipo = 'pagamento.estornado'
+      WHERE p.status <> 'estornado'

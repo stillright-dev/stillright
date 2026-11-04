@@ -1,0 +1,10 @@
+# Optional: a throwaway PostgreSQL for the example, if you don't have one.
+#   docker compose up -d
+#   export DATABASE_URL=postgres://postgres:postgres@localhost:5433/assinaturas?sslmode=disable
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: assinaturas
+    ports: ["5433:5432"]

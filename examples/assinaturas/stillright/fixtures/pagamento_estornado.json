@@ -1,0 +1,1 @@
+{"id": "evt_estorno_1", "tipo": "pagamento.estornado", "pagamento_id": "pay_123", "cliente_id": 42}
