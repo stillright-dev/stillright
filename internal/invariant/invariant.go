@@ -35,10 +35,13 @@ const (
 	Error Status = "ERROR"
 )
 
+// Result is the outcome of one check: an invariant, or an effect assertion
+// (whose evidence rows are the matching outbound calls).
 type Result struct {
 	Name     string
 	Status   Status
 	Evidence Rows   // rows returned, when Status is Fail
+	Detail   string // what was expected, for effects: "2 matching calls, expected <= 1"
 	Reason   string // why it could not be checked, when Status is Error
 }
 
@@ -54,8 +57,8 @@ func Check(ctx context.Context, q Querier, inv scenario.Invariant) Result {
 	return Result{Name: inv.Name, Status: Fail, Evidence: rows}
 }
 
-// NotChecked is the result for an invariant that could not be checked because
-// an earlier step of the run failed.
-func NotChecked(inv scenario.Invariant, reason string) Result {
-	return Result{Name: inv.Name, Status: Error, Reason: "not checked: " + reason}
+// NotChecked is the result for a check that could not run because an
+// earlier step of the run failed.
+func NotChecked(name, reason string) Result {
+	return Result{Name: name, Status: Error, Reason: "not checked: " + reason}
 }

@@ -69,6 +69,28 @@ func TestLoadValid(t *testing.T) {
 	}
 }
 
+func TestProxyDefaults(t *testing.T) {
+	if sc := mustParse(t, minimal); sc.UsesProxy() {
+		t.Error("no effects and no proxy section: proxy must not run")
+	}
+	sc := mustParse(t, minimal+"effects:\n  - name: one email\n    assert: count(path == \"/send\") <= 1\n")
+	if sc.Proxy.Listen != DefaultProxyListen || sc.Effects[0].Assertion == nil {
+		t.Errorf("listen = %q, assertion = %v", sc.Proxy.Listen, sc.Effects[0].Assertion)
+	}
+	if got := sc.Checks(); len(got) != 2 || got[1] != "one email" {
+		t.Errorf("checks = %v", got)
+	}
+	sc = mustParse(t, minimal+"proxy:\n  listen: :9000\n  stubs:\n    - host: API.Email.local\n      status: 202\n")
+	st := sc.Proxy.Stubs[0]
+	if sc.Proxy.Listen != "127.0.0.1:9000" || st.Host != "api.email.local" || st.Status != 202 || st.Body != "{}" {
+		t.Errorf("proxy = %+v", sc.Proxy)
+	}
+	sc = mustParse(t, minimal+"proxy:\n  stubs:\n    - host: x\n      body: \"\"\n")
+	if st := sc.Proxy.Stubs[0]; st.Status != 200 || st.Body != "" {
+		t.Errorf("explicit empty body must stay empty: %+v", st)
+	}
+}
+
 func TestResetDefaultsToNone(t *testing.T) {
 	sc := mustParse(t, minimal)
 	if sc.Setup.Reset != ResetNone {
@@ -229,9 +251,34 @@ invariants:`, 1),
 			},
 		},
 		{
+			name: "bad effect assertion",
+			src:  minimal + "effects:\n  - name: one email\n    assert: count(hots == \"x\") <= 1\n",
+			want: []string{`s.yaml:14: effects[0].assert: column 7: unknown field "hots"`},
+		},
+		{
+			name: "effect name clashes with invariant",
+			src:  minimal + "effects:\n  - name: nothing\n    assert: count() == 0\n",
+			want: []string{`s.yaml:13: effects[0].name: duplicate name "nothing"`},
+		},
+		{
+			name: "bad proxy",
+			src:  minimal + "proxy:\n  listen: 8899\n  stubs:\n    - host: a.local\n    - host: A.local\n      status: 700\n    - status: 200\n",
+			want: []string{
+				`s.yaml:13: proxy.listen: must be host:port`,
+				`s.yaml:16: proxy.stubs[1].host: duplicate stub for "a.local"`,
+				`s.yaml:17: proxy.stubs[1].status: 700 is not an HTTP status code`,
+				`proxy.stubs[2].host: is required`,
+			},
+		},
+		{
+			name: "negative settle",
+			src:  minimal + "settle_ms: -1\n",
+			want: []string{"s.yaml:12: settle_ms: must be 0 or more"},
+		},
+		{
 			name: "no events or invariants",
 			src:  "version: 1\nname: x\ntarget: { base_url: http://x, database_url: postgres://x }\n",
-			want: []string{"events: at least one event is required", "invariants: at least one invariant is required"},
+			want: []string{"events: at least one event is required", "invariants: at least one invariant (or effect) is required"},
 		},
 	}
 	for _, tc := range cases {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/stillright-dev/stillright/internal/effects"
 	"github.com/stillright-dev/stillright/internal/invariant"
 	"github.com/stillright-dev/stillright/internal/perturb"
 	"github.com/stillright-dev/stillright/internal/scenario"
@@ -73,6 +74,12 @@ type Exploration struct {
 	Error string
 	// Only is the single sequence that was run, when not generating.
 	Only *perturb.Sequence
+	// ProxyAddr is where the effects proxy listened, and ProxyCalls how many
+	// outbound calls it recorded in total; zero calls usually means the app
+	// is not routed through it.
+	ProxyAddr  string
+	ProxyCalls int
+	ProxyHosts []string // every host the proxy saw
 }
 
 type InvariantStats struct {
@@ -98,6 +105,7 @@ type Shrunk struct {
 	Reproduced int
 	Attempts   int
 	Evidence   invariant.Rows // from a failing confirmation run
+	Detail     string         // that run's invariant.Result.Detail
 	Tried      int            // candidates evaluated
 	Exceeded   bool           // the budget ran out before a minimum
 }
@@ -130,7 +138,27 @@ func Explore(ctx context.Context, sc *scenario.Scenario, opts Options) *Explorat
 		Target: &HTTPTarget{BaseURL: sc.Target.BaseURL, Client: newHTTPClient(opts.HTTPTimeout)},
 		Store:  store,
 	}
-	return r.Explore(ctx, sc, opts)
+	var proxy *effects.Proxy
+	if sc.UsesProxy() {
+		stubs := make([]effects.Stub, len(sc.Proxy.Stubs))
+		for i, s := range sc.Proxy.Stubs {
+			stubs[i] = effects.Stub{Host: s.Host, Status: s.Status, Body: s.Body, Headers: s.Headers}
+		}
+		proxy, err = effects.Listen(sc.Proxy.Listen, stubs)
+		if err != nil {
+			ex := newExploration(sc, opts)
+			ex.Error = fmt.Sprintf("cannot start the effects proxy on %s: %v", sc.Proxy.Listen, err)
+			return ex
+		}
+		defer proxy.Close()
+		r.Effects = proxy
+	}
+
+	ex := r.Explore(ctx, sc, opts)
+	if proxy != nil {
+		ex.ProxyAddr, ex.ProxyCalls, ex.ProxyHosts = proxy.Addr(), proxy.Total(), proxy.Hosts()
+	}
+	return ex
 }
 
 // Explore runs sequences 0..planned-1 of opts.Seed (or opts.Only, up to
@@ -185,23 +213,23 @@ func (r *Runner) shrink(ctx context.Context, sc *scenario.Scenario, inv int, seq
 		budget = DefaultShrinkBudget
 	}
 	// confirm runs seq up to n times, stopping at the first failure when
-	// stopEarly; it returns the failures and the first failing evidence.
-	confirm := func(seq perturb.Sequence, n int, stopEarly bool) (int, *invariant.Rows) {
+	// stopEarly; it returns the failures and the first failing result.
+	confirm := func(seq perturb.Sequence, n int, stopEarly bool) (int, *invariant.Result) {
 		fails := 0
-		var evidence *invariant.Rows
+		var first *invariant.Result
 		for a := 0; a < n && ctx.Err() == nil; a++ {
 			res := r.RunSequence(ctx, sc, seq)
 			if ctx.Err() == nil && res.Invariants[inv].Status == invariant.Fail {
 				fails++
-				if evidence == nil {
-					evidence = &res.Invariants[inv].Evidence
+				if first == nil {
+					first = &res.Invariants[inv]
 				}
 				if stopEarly {
 					break
 				}
 			}
 		}
-		return fails, evidence
+		return fails, first
 	}
 
 	if fails, _ := confirm(seq, attempts, true); fails == 0 {
@@ -212,16 +240,16 @@ func (r *Runner) shrink(ctx context.Context, sc *scenario.Scenario, inv int, seq
 		fails, _ := confirm(cand, attempts, true)
 		tried++
 		if opts.ShrinkProgress != nil {
-			opts.ShrinkProgress(sc.Invariants[inv].Name, tried, budget)
+			opts.ShrinkProgress(sc.Checks()[inv], tried, budget)
 		}
 		return fails > 0
 	}, budget)
 
 	out := &Shrunk{Sequence: res.Sequence, Attempts: attempts, Tried: res.Tried, Exceeded: res.Exceeded}
-	fails, evidence := confirm(res.Sequence, attempts, false)
+	fails, first := confirm(res.Sequence, attempts, false)
 	out.Reproduced = fails
-	if evidence != nil {
-		out.Evidence = *evidence
+	if first != nil {
+		out.Evidence, out.Detail = first.Evidence, first.Detail
 	}
 	return out
 }
@@ -231,8 +259,8 @@ func newExploration(sc *scenario.Scenario, opts Options) *Exploration {
 	if opts.Only != nil {
 		ex.Planned = opts.attempts()
 	}
-	for _, inv := range sc.Invariants {
-		ex.Invariants = append(ex.Invariants, InvariantStats{Name: inv.Name})
+	for _, name := range sc.Checks() {
+		ex.Invariants = append(ex.Invariants, InvariantStats{Name: name})
 	}
 	return ex
 }

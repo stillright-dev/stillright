@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/stillright-dev/stillright/internal/effects"
 	"github.com/stillright-dev/stillright/internal/invariant"
 	"github.com/stillright-dev/stillright/internal/perturb"
 	"github.com/stillright-dev/stillright/internal/scenario"
@@ -35,6 +36,8 @@ type Result struct {
 	Scenario   *scenario.Scenario
 	Sequence   perturb.Sequence
 	Deliveries []Delivery
+	// Invariants holds every check: the scenario's invariants, then its
+	// effects, in declaration order.
 	Invariants []invariant.Result
 	// Error explains why the run could not be verified. When set, every
 	// invariant is reported as ERROR without being checked.
@@ -60,6 +63,8 @@ func (r *Result) Status() invariant.Status {
 type Runner struct {
 	Target Target
 	Store  Store
+	// Effects records outbound calls; nil when the scenario has no effects.
+	Effects effects.Recorder
 }
 
 // RunSequence executes one sequence: reset, setup, deliver each batch with
@@ -77,6 +82,9 @@ func (r *Runner) RunSequence(ctx context.Context, sc *scenario.Scenario, seq per
 			return failed(res, fmt.Sprintf("setup SQL %s failed: %v", sc.Setup.SQLFile, err))
 		}
 	}
+	if r.Effects != nil {
+		r.Effects.Reset()
+	}
 
 	for bi, batch := range seq.Batches {
 		delivered := r.deliverBatch(ctx, sc, bi, batch)
@@ -88,8 +96,58 @@ func (r *Runner) RunSequence(ctx context.Context, sc *scenario.Scenario, seq per
 		}
 	}
 
+	if sc.SettleMS > 0 {
+		t := time.NewTimer(time.Duration(sc.SettleMS) * time.Millisecond)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return failed(res, "interrupted")
+		}
+	}
+
 	for _, inv := range sc.Invariants {
 		res.Invariants = append(res.Invariants, invariant.Check(ctx, r.Store, inv))
+	}
+	var calls []effects.Call
+	if r.Effects != nil {
+		calls = r.Effects.Calls()
+	}
+	for _, ef := range sc.Effects {
+		if r.Effects == nil {
+			res.Invariants = append(res.Invariants, invariant.Result{Name: ef.Name, Status: invariant.Error, Reason: "effects proxy is not running"})
+			continue
+		}
+		res.Invariants = append(res.Invariants, checkEffect(ef, calls))
+	}
+	return res
+}
+
+// checkEffect evaluates an effect assertion over the calls recorded during
+// the run. The matching calls are the evidence when it fails.
+func checkEffect(ef scenario.Effect, calls []effects.Call) invariant.Result {
+	matching := ef.Assertion.Matching(calls)
+	if ef.Assertion.Holds(len(matching)) {
+		return invariant.Result{Name: ef.Name, Status: invariant.Pass}
+	}
+	res := invariant.Result{
+		Name:   ef.Name,
+		Status: invariant.Fail,
+		Detail: fmt.Sprintf("%d matching calls, expected %s", len(matching), ef.Assertion.Expectation()),
+		Evidence: invariant.Rows{
+			Columns: []string{"method", "host", "path", "body"},
+			Total:   len(matching),
+		},
+	}
+	for i, c := range matching {
+		if i == invariant.MaxEvidenceRows {
+			break
+		}
+		path, body := c.Path, string(c.Body)
+		if c.Query != "" {
+			path += "?" + c.Query
+		}
+		res.Evidence.Values = append(res.Evidence.Values, []*string{&c.Method, &c.Host, &path, &body})
 	}
 	return res
 }
@@ -145,8 +203,8 @@ func (r *Runner) deliver(ctx context.Context, sc *scenario.Scenario, ev scenario
 func failed(res *Result, reason string) *Result {
 	res.Error = reason
 	res.Invariants = res.Invariants[:0]
-	for _, inv := range res.Scenario.Invariants {
-		res.Invariants = append(res.Invariants, invariant.NotChecked(inv, reason))
+	for _, name := range res.Scenario.Checks() {
+		res.Invariants = append(res.Invariants, invariant.NotChecked(name, reason))
 	}
 	return res
 }

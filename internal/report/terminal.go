@@ -46,8 +46,11 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 	if sc.Setup.SQLFile != "" {
 		fmt.Fprintf(w, "setup     %s\n", sc.Setup.SQLFile)
 	}
-	if n := len(sc.Effects); n > 0 {
-		fmt.Fprintf(w, "note      %d effect assertion(s) not checked: effects are not supported in this version yet\n", n)
+	if sc.SettleMS > 0 {
+		fmt.Fprintf(w, "settle    %dms after the last delivery\n", sc.SettleMS)
+	}
+	if sc.UsesProxy() {
+		fmt.Fprintf(w, "proxy     %s records outbound calls (run the app with HTTP_PROXY=http://%s)\n", sc.Proxy.Listen, sc.Proxy.Listen)
 	}
 
 	if ex.Error != "" {
@@ -91,6 +94,7 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 		}
 	}
 
+	writeProxyWarnings(w, ex)
 	fmt.Fprintf(w, "\n%d passed, %d failed, %d errors\n", pass, fail, errs)
 	fmt.Fprintf(w, "%d of %d runs: %d passed, %d failed, %d could not be verified\n",
 		ex.Executed, ex.Planned, ex.Executed-ex.Failed-ex.Errored, ex.Failed, ex.Errored)
@@ -99,6 +103,37 @@ func Terminal(w io.Writer, ex *runner.Exploration) {
 		fmt.Fprintf(w, "interrupted before everything ran\n")
 	case ex.Executed < ex.Planned:
 		fmt.Fprintf(w, "stopped at the first run that did not pass; use --keep-going to run them all\n")
+	}
+}
+
+// writeProxyWarnings flags effect results that are probably vacuous: an
+// assertion like count(host == "x") <= 1 passes trivially when the app's
+// calls never reach the proxy.
+func writeProxyWarnings(w io.Writer, ex *runner.Exploration) {
+	sc := ex.Scenario
+	if !sc.UsesProxy() || ex.Executed == 0 {
+		return
+	}
+	if ex.ProxyCalls == 0 {
+		fmt.Fprintf(w, "\nwarning: the effects proxy recorded no outbound calls in any run. If the app should\n"+
+			"         make calls here, it is not using the proxy and effect results mean nothing;\n"+
+			"         see docs/effects.md.\n")
+		return
+	}
+	seen := map[string]bool{}
+	for _, h := range ex.ProxyHosts {
+		seen[h] = true
+	}
+	for _, ef := range sc.Effects {
+		if ef.Assertion == nil {
+			continue
+		}
+		for _, h := range ef.Assertion.Hosts() {
+			if !seen[h] {
+				fmt.Fprintf(w, "\nwarning: %q filters on host %q, which the proxy never saw\n"+
+					"         (it saw: %s); see docs/effects.md.\n", ef.Name, h, strings.Join(ex.ProxyHosts, ", "))
+			}
+		}
 	}
 }
 
@@ -113,7 +148,7 @@ func seqLabel(sc *scenario.Scenario, seq perturb.Sequence) string {
 // reproduce a failed invariant.
 func writeFailure(w io.Writer, ex *runner.Exploration, st runner.InvariantStats) {
 	sc := ex.Scenario
-	evidence := st.FirstFailure.Evidence
+	evidence, detail := st.FirstFailure.Evidence, st.FirstFailure.Detail
 	smallest := st.FirstSequence
 
 	if sh := st.Shrunk; sh != nil {
@@ -131,12 +166,17 @@ func writeFailure(w io.Writer, ex *runner.Exploration, st runner.InvariantStats)
 			}
 			fmt.Fprintf(w, "       smallest sequence: %s   (%s; %s)\n", perturb.Format(sc, smallest), describeSequence(smallest), note)
 			if sh.Reproduced > 0 {
-				evidence = sh.Evidence
+				evidence, detail = sh.Evidence, sh.Detail
 			}
 		}
 	}
 
-	if evidence.Total == 1 && len(evidence.Values) == 1 {
+	if detail != "" {
+		fmt.Fprintf(w, "       %s\n", detail)
+	}
+	if evidence.Total == 0 {
+		// An effect that expected calls and saw none has nothing to show.
+	} else if evidence.Total == 1 && len(evidence.Values) == 1 {
 		pairs := make([]string, len(evidence.Columns))
 		for i, c := range evidence.Columns {
 			pairs[i] = c + "=" + cell(evidence.Values[0][i])

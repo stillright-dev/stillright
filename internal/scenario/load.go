@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,6 +14,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/stillright-dev/stillright/internal/effects"
 )
 
 // Error is a single problem found in a scenario file.
@@ -251,8 +254,8 @@ func (v *validator) validate(sc *Scenario) {
 		v.fail(p("runs"), "must be at least 1")
 	}
 
-	if len(sc.Invariants) == 0 {
-		v.fail(p("invariants"), "at least one invariant is required")
+	if len(sc.Invariants) == 0 && len(sc.Effects) == 0 {
+		v.fail(p("invariants"), "at least one invariant (or effect) is required")
 	}
 	seen := map[string]bool{}
 	for i := range sc.Invariants {
@@ -270,12 +273,64 @@ func (v *validator) validate(sc *Scenario) {
 		}
 	}
 
-	for i, ef := range sc.Effects {
-		if strings.TrimSpace(ef.Name) == "" {
+	if v.has("settle_ms") && sc.SettleMS < 0 {
+		v.fail(p("settle_ms"), "must be 0 or more")
+	}
+	v.validateEffects(sc, seen)
+}
+
+func (v *validator) validateEffects(sc *Scenario, names map[string]bool) {
+	for i := range sc.Effects {
+		ef := &sc.Effects[i]
+		ef.Name = strings.TrimSpace(ef.Name)
+		switch {
+		case ef.Name == "":
 			v.fail(p("effects", i, "name"), "is required")
+		case names[ef.Name]:
+			v.fail(p("effects", i, "name"), "duplicate name %q (invariants and effects share names)", ef.Name)
 		}
+		names[ef.Name] = true
 		if strings.TrimSpace(ef.Assert) == "" {
 			v.fail(p("effects", i, "assert"), "is required")
+			continue
+		}
+		a, err := effects.ParseAssertion(ef.Assert)
+		if err != nil {
+			v.fail(p("effects", i, "assert"), "%v", err)
+			continue
+		}
+		ef.Assertion = a
+	}
+
+	px := &sc.Proxy
+	if !v.has("proxy") && len(sc.Effects) == 0 {
+		return
+	}
+	if px.Listen == "" {
+		px.Listen = DefaultProxyListen
+	} else if host, port, err := net.SplitHostPort(px.Listen); err != nil || port == "" {
+		v.fail(p("proxy", "listen"), "must be host:port, like %s (got %q)", DefaultProxyListen, px.Listen)
+	} else if host == "" {
+		px.Listen = "127.0.0.1:" + port // never listen on every interface by accident
+	}
+	hosts := map[string]bool{}
+	for i := range px.Stubs {
+		st := &px.Stubs[i]
+		st.Host = strings.ToLower(strings.TrimSpace(st.Host))
+		switch {
+		case st.Host == "":
+			v.fail(p("proxy", "stubs", i, "host"), "is required")
+		case hosts[st.Host]:
+			v.fail(p("proxy", "stubs", i, "host"), "duplicate stub for %q", st.Host)
+		}
+		hosts[st.Host] = true
+		if !v.has("proxy", "stubs", i, "status") {
+			st.Status = 200
+		} else if st.Status < 100 || st.Status > 599 {
+			v.fail(p("proxy", "stubs", i, "status"), "%d is not an HTTP status code", st.Status)
+		}
+		if !v.has("proxy", "stubs", i, "body") {
+			st.Body = "{}"
 		}
 	}
 }

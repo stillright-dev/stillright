@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stillright-dev/stillright/internal/effects"
 	"github.com/stillright-dev/stillright/internal/invariant"
 	"github.com/stillright-dev/stillright/internal/perturb"
 	"github.com/stillright-dev/stillright/internal/scenario"
@@ -386,7 +387,7 @@ func TestExploreShrinks(t *testing.T) {
 	if st.FirstFailure == nil || st.Shrunk == nil {
 		t.Fatalf("no failure or no shrink: %+v", st)
 	}
-	if got := perturb.Format(sc, st.Shrunk.Sequence); got != "[first ‖ first]" {
+	if got := perturb.Format(sc, st.Shrunk.Sequence); got != "[first] → [first]" { // concurrency is not needed, so it is shrunk away
 		t.Errorf("shrunk to %s (from %s)", got, perturb.Format(sc, st.FirstSequence))
 	}
 	if st.Shrunk.Reproduced != 3 || st.Shrunk.Attempts != 3 || st.Shrunk.Tried == 0 {
@@ -448,4 +449,74 @@ func (a *onceApp) QueryRows(_ context.Context, sql string, _ int) (invariant.Row
 		return invariant.Rows{Columns: []string{"x"}, Total: 1}, nil
 	}
 	return invariant.Rows{}, nil
+}
+
+type fakeRecorder struct{ calls []effects.Call }
+
+func (f *fakeRecorder) Reset()                { f.calls = nil }
+func (f *fakeRecorder) Calls() []effects.Call { return f.calls }
+
+// emailTarget "sends" one welcome e-mail per delivery of /1.
+type emailTarget struct{ rec *fakeRecorder }
+
+func (e *emailTarget) Send(_ context.Context, r scenario.Request) (Response, error) {
+	if r.Path == "/1" {
+		e.rec.calls = append(e.rec.calls, effects.Call{Method: "POST", Host: "api.email.local", Path: "/send", Body: []byte("welcome")})
+	}
+	return Response{Status: 200}, nil
+}
+
+func effectScenario(t *testing.T) *scenario.Scenario {
+	sc := testScenario()
+	for _, src := range []string{`count(host == "api.email.local" && path == "/send") <= 1`, `count(path == "/never") >= 1`} {
+		a, err := effects.ParseAssertion(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sc.Effects = append(sc.Effects, scenario.Effect{Name: src, Assert: src, Assertion: a})
+	}
+	return sc
+}
+
+func TestEffectsAreChecked(t *testing.T) {
+	sc := effectScenario(t)
+	rec := &fakeRecorder{calls: []effects.Call{{Host: "stale.from.previous.run"}}}
+	r := &Runner{Target: &emailTarget{rec}, Store: &fakeStore{}, Effects: rec}
+
+	once := r.RunSequence(context.Background(), sc, perturb.Baseline(sc))
+	if got := statuses(once); got != "ok=PASS broken=PASS "+sc.Effects[0].Name+"=PASS "+sc.Effects[1].Name+"=FAIL" {
+		t.Errorf("statuses = %s", got)
+	}
+	if d := once.Invariants[3].Detail; d != "0 matching calls, expected >= 1" {
+		t.Errorf("detail = %q", d)
+	}
+
+	twice := perturb.Sequence{Batches: []perturb.Batch{{{Event: 0}}, {{Event: 0}}}}
+	res := r.RunSequence(context.Background(), sc, twice)
+	email := res.Invariants[2]
+	if email.Status != invariant.Fail || email.Detail != "2 matching calls, expected <= 1" || email.Evidence.Total != 2 {
+		t.Fatalf("email = %+v", email)
+	}
+	if row := email.Evidence.Values[0]; *row[0] != "POST" || *row[1] != "api.email.local" || *row[2] != "/send" || *row[3] != "welcome" {
+		t.Errorf("evidence row = %v %v %v %v", *row[0], *row[1], *row[2], *row[3])
+	}
+}
+
+func TestEffectsNotCheckedAfterFailedStep(t *testing.T) {
+	sc := effectScenario(t)
+	rec := &fakeRecorder{}
+	res := (&Runner{Target: &fakeTarget{err: errors.New("down")}, Store: &fakeStore{}, Effects: rec}).RunSequence(context.Background(), sc, perturb.Baseline(sc))
+	if len(res.Invariants) != 4 || res.Status() != invariant.Error {
+		t.Errorf("results = %+v", res.Invariants)
+	}
+}
+
+func TestSettleWaits(t *testing.T) {
+	sc := testScenario()
+	sc.SettleMS = 60
+	start := time.Now()
+	run(&fakeTarget{}, &fakeStore{}, sc)
+	if d := time.Since(start); d < 60*time.Millisecond {
+		t.Errorf("run took %v, want >= 60ms", d)
+	}
 }

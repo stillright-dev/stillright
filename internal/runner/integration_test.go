@@ -3,8 +3,10 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/stillright-dev/stillright/internal/effects"
 	"github.com/stillright-dev/stillright/internal/invariant"
 	"github.com/stillright-dev/stillright/internal/perturb"
 	"github.com/stillright-dev/stillright/internal/scenario"
@@ -239,4 +242,99 @@ func TestIntegrationFindsRace(t *testing.T) {
 	}
 	t.Logf("found in sequence %d: %s; shrunk to %s in %d candidates, reproduced %d/%d",
 		first.Index, perturb.Format(sc, first), perturb.Format(sc, sh.Sequence), sh.Tried, sh.Reproduced, sh.Attempts)
+}
+
+// TestIntegrationEffects runs an app that sends a welcome e-mail through
+// HTTP_PROXY-style proxying unless it already sent one: a check-then-act
+// race on an outbound call, which only the effects proxy can see.
+func TestIntegrationEffects(t *testing.T) {
+	url := testDatabaseURL(t)
+	ctx := context.Background()
+	pool, err := pgxpool.New(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if _, err := pool.Exec(ctx, `CREATE TABLE IF NOT EXISTS sr_it_emails (id serial PRIMARY KEY, kind text)`); err != nil {
+		t.Fatal(err)
+	}
+
+	addr := freeAddr(t)
+	proxyURL, _ := neturl.Parse("http://" + addr)
+	appClient := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		var sent bool
+		if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM sr_it_emails WHERE kind = 'welcome')`).Scan(&sent); err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+		if !sent {
+			resp, err := appClient.Post("http://api.email.local/send", "application/json", strings.NewReader(`{"template":"welcome"}`))
+			if err != nil {
+				http.Error(w, err.Error(), 500)
+				return
+			}
+			resp.Body.Close()
+			if resp.StatusCode != 202 {
+				http.Error(w, "email provider said "+resp.Status, 500)
+				return
+			}
+			pool.Exec(ctx, `INSERT INTO sr_it_emails (kind) VALUES ('welcome')`)
+		}
+		w.WriteHeader(200)
+	}))
+	defer app.Close()
+
+	sc := &scenario.Scenario{
+		Name:    "effects",
+		Target:  scenario.Target{BaseURL: app.URL, DatabaseURL: url},
+		Setup:   scenario.Setup{Reset: scenario.ResetTruncate, ResetTables: []string{"sr_it_emails"}},
+		Events:  []scenario.Event{{ID: "paid", Request: scenario.Request{Method: "POST", Path: "/hook"}}},
+		Perturb: scenario.Perturb{Duplicate: 3, Concurrency: 3},
+		Proxy:   scenario.Proxy{Listen: addr, Stubs: []scenario.Stub{{Host: "api.email.local", Status: 202, Body: "{}"}}},
+	}
+	a, err := effects.ParseAssertion(`count(host == "api.email.local" && path == "/send" && body contains "welcome") <= 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Effects = []scenario.Effect{{Name: "at most one welcome email", Assertion: a}}
+
+	ex := Explore(ctx, sc, Options{HTTPTimeout: 5 * time.Second, Seed: 8812, Runs: 40, Attempts: 5, Shrink: true})
+	if ex.Error != "" || ex.Failed == 0 {
+		t.Fatalf("error=%q failed=%d of %d", ex.Error, ex.Failed, ex.Executed)
+	}
+	st := ex.Invariants[0]
+	if st.Shrunk == nil || perturb.Format(sc, st.Shrunk.Sequence) != "[paid ‖ paid]" || st.Shrunk.Detail != "2 matching calls, expected <= 1" {
+		t.Fatalf("shrunk = %+v", st.Shrunk)
+	}
+	if ex.ProxyCalls == 0 || ex.ProxyAddr != addr {
+		t.Errorf("proxy addr=%s calls=%d", ex.ProxyAddr, ex.ProxyCalls)
+	}
+	t.Logf("shrunk to %s, reproduced %d/%d; proxy saw %d calls", perturb.Format(sc, st.Shrunk.Sequence), st.Shrunk.Reproduced, st.Shrunk.Attempts, ex.ProxyCalls)
+
+	t.Run("busy proxy port is an error", func(t *testing.T) {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer ln.Close()
+		busy := *sc
+		busy.Proxy.Listen = ln.Addr().String()
+		ex := Explore(ctx, &busy, Options{})
+		if !strings.HasPrefix(ex.Error, "cannot start the effects proxy on") || ex.ExitCode() != 2 {
+			t.Errorf("error=%q exit=%d", ex.Error, ex.ExitCode())
+		}
+	})
+}
+
+func freeAddr(t *testing.T) string {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().String()
 }

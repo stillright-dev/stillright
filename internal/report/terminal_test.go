@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stillright-dev/stillright/internal/effects"
 	"github.com/stillright-dev/stillright/internal/invariant"
 	"github.com/stillright-dev/stillright/internal/perturb"
 	"github.com/stillright-dev/stillright/internal/runner"
@@ -24,7 +25,7 @@ func testScenario() *scenario.Scenario {
 			{Name: "one active subscription per customer"},
 			{Name: "bad"},
 		},
-		Effects: []scenario.Effect{{Name: "e", Assert: "count() <= 1"}},
+		Proxy: scenario.Proxy{Listen: "127.0.0.1:8899"},
 	}
 }
 
@@ -54,7 +55,7 @@ func TestTerminalStopsAtFailure(t *testing.T) {
 		},
 	}
 	ex := &runner.Exploration{
-		Scenario: sc, Seed: 8812, Planned: 200, Executed: 38, Errored: 1, First: res,
+		Scenario: sc, Seed: 8812, Planned: 200, Executed: 38, Errored: 1, First: res, ProxyCalls: 4,
 		Invariants: []runner.InvariantStats{
 			{Name: "refund leaves no active subscription"},
 			{Name: "one active subscription per customer", Failed: 1, FirstFailure: &fail, FirstSequence: seq},
@@ -70,7 +71,7 @@ perturb   duplicate up to 3×, up to 5 concurrent, reorder (may violate after), 
 runs      200 sequences (sequence 0 is the declared order)
 reset     truncate subscriptions, payments, before every sequence
 setup     fixtures/seed.sql
-note      1 effect assertion(s) not checked: effects are not supported in this version yet
+proxy     127.0.0.1:8899 records outbound calls (run the app with HTTP_PROXY=http://127.0.0.1:8899)
 
 sequence 37: [paid ‖ paid+120ms] → [refunded]
   batch 1   paid      POST /webhooks/payment  → 200  (14ms)
@@ -211,5 +212,66 @@ func TestTerminalNotReproducible(t *testing.T) {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in:\n%s", w, got)
 		}
+	}
+}
+
+func TestTerminalEffectFailureAndProxyWarning(t *testing.T) {
+	sc := testScenario()
+	sc.Invariants = nil
+	sc.Effects = []scenario.Effect{{Name: "at most one welcome email"}, {Name: "receipt sent"}}
+	seq := perturb.Sequence{Index: 3, Batches: []perturb.Batch{{{Event: 0}, {Event: 0}}}}
+	many := invariant.Result{Status: invariant.Fail, Detail: "2 matching calls, expected <= 1", Evidence: invariant.Rows{
+		Columns: []string{"method", "host", "path", "body"},
+		Values:  [][]*string{{str("POST"), str("api.email.local"), str("/send"), str(`{"t":"welcome"}`)}, {str("POST"), str("api.email.local"), str("/send"), str(`{"t":"welcome"}`)}},
+		Total:   2,
+	}}
+	none := invariant.Result{Status: invariant.Fail, Detail: "0 matching calls, expected >= 1", Evidence: invariant.Rows{Columns: []string{"method", "host", "path", "body"}}}
+	ex := &runner.Exploration{Scenario: sc, Seed: 1, Planned: 10, Executed: 4, Failed: 1, Invariants: []runner.InvariantStats{
+		{Name: "at most one welcome email", Failed: 1, FirstFailure: &many, FirstSequence: seq},
+		{Name: "receipt sent", Failed: 1, FirstFailure: &none, FirstSequence: seq},
+	}}
+
+	var b strings.Builder
+	Terminal(&b, ex)
+	got := b.String()
+	for _, w := range []string{
+		"FAIL   at most one welcome email\n       failed in 1 of 4 runs; first in sequence 3: [paid ‖ paid]\n       2 matching calls, expected <= 1\n       evidence: 2 rows\n       method | host            | path  | body\n",
+		"FAIL   receipt sent\n       failed in 1 of 4 runs; first in sequence 3: [paid ‖ paid]\n       0 matching calls, expected >= 1\n       reproduce:",
+		"warning: the effects proxy recorded no outbound calls in any run.",
+	} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in:\n%s", w, got)
+		}
+	}
+
+	ex.ProxyCalls = 2
+	b.Reset()
+	Terminal(&b, ex)
+	if strings.Contains(b.String(), "warning:") {
+		t.Error("no warning once the proxy saw calls")
+	}
+}
+
+func TestTerminalWarnsAboutUnseenHost(t *testing.T) {
+	sc := testScenario()
+	a, err := effects.ParseAssertion(`count(host == "api.email.local") <= 1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sc.Effects = []scenario.Effect{{Name: "one email", Assertion: a}}
+	ex := &runner.Exploration{Scenario: sc, Seed: 1, Planned: 1, Executed: 1, ProxyCalls: 3, ProxyHosts: []string{"127.0.0.1"}}
+	for _, n := range sc.Checks() {
+		ex.Invariants = append(ex.Invariants, runner.InvariantStats{Name: n})
+	}
+	var b strings.Builder
+	Terminal(&b, ex)
+	if !strings.Contains(b.String(), "warning: \"one email\" filters on host \"api.email.local\", which the proxy never saw\n         (it saw: 127.0.0.1)") {
+		t.Errorf("got:\n%s", b.String())
+	}
+	ex.ProxyHosts = []string{"api.email.local"}
+	b.Reset()
+	Terminal(&b, ex)
+	if strings.Contains(b.String(), "warning") {
+		t.Errorf("unexpected warning:\n%s", b.String())
 	}
 }
