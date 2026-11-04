@@ -235,7 +235,7 @@ that it passes, and tells you the rate it observed.
   publishes the job summary and uploads the reports.
 
 ```yaml
-- uses: stillright-dev/stillright@main
+- uses: stillright-dev/stillright@v0.1.0
   with:
     scenarios: stillright
 ```

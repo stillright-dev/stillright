@@ -44,7 +44,7 @@ jobs:
           NODE_USE_ENV_PROXY=1 HTTP_PROXY=http://127.0.0.1:8899 npm start &
           npx wait-on http://localhost:3000/health
 
-      - uses: stillright-dev/stillright@main
+      - uses: stillright-dev/stillright@v0.1.0
         with:
           scenarios: stillright          # folder with your *.yaml scenarios
           args: --runs 100

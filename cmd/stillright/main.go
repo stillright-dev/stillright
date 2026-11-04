@@ -11,6 +11,8 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/stillright-dev/stillright/internal/perturb"
@@ -19,8 +21,22 @@ import (
 	"github.com/stillright-dev/stillright/internal/scenario"
 )
 
-// version is set at build time with -ldflags "-X main.version=...".
-var version = "0.1.0-dev"
+// version can be set at build time with -ldflags "-X main.version=...";
+// otherwise it comes from the module version that go install records.
+var version = ""
+
+// resolveVersion picks the version to report: the -ldflags value, else the
+// module version from build info (v0.1.0 for go install ...@v0.1.0), else
+// "dev" for builds from a checkout.
+func resolveVersion(ldflags string, info *debug.BuildInfo) string {
+	if ldflags != "" {
+		return ldflags
+	}
+	if info != nil && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return strings.TrimPrefix(info.Main.Version, "v")
+	}
+	return "dev"
+}
 
 const usage = `stillright — still right when things go wrong.
 
@@ -33,6 +49,8 @@ not be verified (bad scenario, database or application unreachable...).
 `
 
 func main() {
+	info, _ := debug.ReadBuildInfo()
+	version = resolveVersion(version, info)
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
