@@ -26,3 +26,69 @@ jobs:
       - run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go vet ./...
       - run: go test -race ./...
+
+  # Runs the action against the example app: the buggy version must fail every
+  # scenario and the fixed one must pass them all.
+  example:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: assinaturas
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/assinaturas?sslmode=disable
+      EMAIL_API_URL: http://127.0.0.1:8899/api.email.local
+    defaults:
+      run:
+        working-directory: examples/assinaturas
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: examples/assinaturas/package-lock.json
+      - run: npm ci
+
+      - name: Start the buggy app
+        run: |
+          npm run db:setup
+          nohup npm start > app.log 2>&1 &
+          for i in $(seq 30); do curl -sf localhost:3000/health && exit 0; sleep 1; done
+          cat app.log; exit 1
+      - name: stillright on the buggy app
+        uses: ./
+        continue-on-error: true
+        with:
+          scenarios: examples/assinaturas/stillright
+          args: --keep-going
+          reports-dir: reports-buggy
+          artifact-name: stillright-reports-buggy
+      - name: Every scenario must have failed
+        working-directory: .
+        run: |
+          for f in reports-buggy/*.json; do
+            status=$(jq -r .status "$f"); echo "$f: $status"
+            [ "$status" = FAIL ] || exit 1
+          done
+          [ "$(ls reports-buggy/*.json | wc -l)" -eq 3 ]
+
+      - name: Start the fixed app
+        run: |
+          pkill -f "node server.js" || true
+          npm run db:setup:fixed
+          nohup npm run start:fixed > app.log 2>&1 &
+          for i in $(seq 30); do curl -sf localhost:3000/health && exit 0; sleep 1; done
+          cat app.log; exit 1
+      - name: stillright on the fixed app
+        uses: ./
+        with:
+          scenarios: examples/assinaturas/stillright
+          args: --keep-going --runs 100
+          reports-dir: reports-fixed
+          artifact-name: stillright-reports-fixed
